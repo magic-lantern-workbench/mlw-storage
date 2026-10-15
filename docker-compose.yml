@@ -3,11 +3,10 @@ services:
     image: drakkan/sftpgo:v2
     container_name: sftpgo
     restart: unless-stopped
-    ports:
-      - "8280:8080"   # Web admin / WebClient
-      - "2022:2022"   # SFTP
-      # - "2121:2121" # FTP (enable in config first)
-      # - "10080:10080" # WebDAV (enable in config first)
+    # No published ports: reach SFTPGo through the proxy service.
+    expose:
+      - "8080"   # Web admin / WebClient
+      - "2022"   # SFTP
     environment:
       SFTPGO_HTTPD__BINDINGS__0__PORT: 8080
       SFTPGO_SFTPD__BINDINGS__0__PORT: 2022

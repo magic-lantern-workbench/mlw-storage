@@ -18,13 +18,11 @@ Requires Docker with Compose.
    docker compose up -d
    ```
 
-3. Open the web admin at http://localhost:8280 and log in as `admin`
+3. Open the web admin at http://localhost:8380 (via the proxy gateway) and log in as `admin`
    (or the value of `SFTPGO_ADMIN_USER`) with your password.
 
-| Port | Purpose           |
-|------|-------------------|
-| 8280 | Web admin / WebClient |
-| 2022 | SFTP              |
+SFTPGo's own ports are not published on the host; reach it through the proxy
+gateway (see below): web admin on 8380, SFTP on 2222.
 
 Create SFTP users in the web admin. Their files are stored in `./data`
 (git-ignored); SFTPGo's database and host keys live in the `sftpgo-config`
@@ -65,5 +63,5 @@ Configuration (environment variables on the `proxy` service):
 | `UPSTREAM_HTTP`     | `http://sftpgo:8080`  | SFTPGo web/API endpoint    |
 | `UPSTREAM_SFTP`     | `sftpgo:2022`         | SFTPGo SFTP endpoint       |
 
-The gateway does not add authentication or rate limiting of its own. SFTPGo's
-own ports (8280, 2022) are still published on the host.
+The gateway does not add authentication or rate limiting of its own. It is the
+only entry point: SFTPGo's own ports are not published on the host.
