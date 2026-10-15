@@ -3,6 +3,9 @@
 //   - a TCP proxy for SFTP, so remote servers can transfer files through it
 //   - optionally (disabled by default) a TCP proxy for FTP, including the
 //     passive data port range, and an HTTP reverse proxy for WebDAV
+//   - optionally (disabled by default) an SFTPGo authentication hook that
+//     accepts Keycloak access tokens as the password, so a Keycloak user can
+//     log in over SFTP using their Keycloak user id and roles
 package main
 
 import (
@@ -43,6 +46,10 @@ func main() {
 		ftpPasv       = env("PROXY_FTP_PASV_RANGE", "50000-50009")
 		webdavListen  = listenAddr(env("PROXY_WEBDAV_LISTEN", "0"))
 		upstreamWebDV = env("UPSTREAM_WEBDAV", "http://sftpgo:10080")
+
+		// Optional Keycloak token authentication; enabled when OIDC_ISSUER is set.
+		oidcIssuer = strings.TrimSuffix(env("OIDC_ISSUER", ""), "/")
+		authListen = env("AUTH_HOOK_LISTEN", ":9000")
 	)
 
 	target, err := url.Parse(upstreamHTTP)
@@ -59,6 +66,33 @@ func main() {
 		_, _ = io.WriteString(w, "ok\n")
 	})
 	mux.Handle("/", newHTTPProxy(target))
+
+	// Optional Keycloak authentication and per-user storage roots.
+	var (
+		authCfg authConfig
+		ver     *verifier
+		st      *storage
+	)
+	if oidcIssuer != "" {
+		authCfg = authConfig{
+			Issuer:         oidcIssuer,
+			JWKSURL:        env("OIDC_JWKS_URL", oidcIssuer+"/protocol/openid-connect/certs"),
+			AllowedClients: splitList(env("OIDC_ALLOWED_CLIENTS", "")),
+			RequiredRole:   env("OIDC_REQUIRED_ROLE", "mlw-user"),
+			ReadOnlyRole:   env("OIDC_READONLY_ROLE", ""),
+		}
+		ver = newVerifier(authCfg)
+		st, err = newStorage(
+			env("STORAGE_USERS_DIR", "/srv/sftpgo/users"),
+			env("STORAGE_SHARED_DIR", "/srv/sftpgo/shared"),
+			env("STORAGE_STATE_FILE", ""),
+		)
+		if err != nil {
+			log.Fatalf("storage: %v", err)
+		}
+		// Users choose their root directory through the public HTTP port.
+		mux.Handle("/mlw/v1/storage/", storageAPI("/mlw/v1/storage/", ver, st))
+	}
 
 	srv := &http.Server{
 		Addr:              httpListen,
@@ -94,6 +128,25 @@ func main() {
 			stop()
 		}
 	}()
+
+	var authSrv *http.Server
+	if oidcIssuer != "" {
+		amux := http.NewServeMux()
+		amux.Handle("/auth", authHook(ver, st))
+		authSrv = &http.Server{
+			Addr:              authListen,
+			Handler:           amux,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		log.Printf("Keycloak auth hook %s (issuer %s, jwks %s, required role %q, clients %v)",
+			authListen, authCfg.Issuer, authCfg.JWKSURL, authCfg.RequiredRole, authCfg.AllowedClients)
+		run("auth hook", func() error {
+			if err := authSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+				return err
+			}
+			return nil
+		})
+	}
 
 	var davSrv *http.Server
 	if ftpListen != "" {
@@ -143,7 +196,21 @@ func main() {
 	if davSrv != nil {
 		_ = davSrv.Shutdown(shutdownCtx)
 	}
+	if authSrv != nil {
+		_ = authSrv.Shutdown(shutdownCtx)
+	}
 	wg.Wait()
+}
+
+// splitList splits a comma-separated list, dropping blanks.
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // listenAddr normalises a listen setting: "" and "0" mean disabled (returns

@@ -1,0 +1,48 @@
+# Optional: log in over SFTP with a Keycloak access token.
+#
+# Enable by adding to .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.keycloak.yml
+# or by passing both files: docker compose -f docker-compose.yml -f docker-compose.keycloak.yml up -d
+#
+# Requires the Keycloak stack's compose network (mlw-platform_default) to exist.
+services:
+  sftpgo:
+    environment:
+      # Password logins (SFTP, FTP, WebDAV, WebClient) are checked by the proxy,
+      # which validates Keycloak tokens and falls back to SFTPGo for other passwords.
+      SFTPGO_DATA_PROVIDER__EXTERNAL_AUTH_HOOK: http://proxy:9000/auth
+      SFTPGO_DATA_PROVIDER__EXTERNAL_AUTH_SCOPE: 1   # 1 = password logins only
+      # SFTPGo stores the login password it was given; a token is longer than
+      # bcrypt's 72-byte limit, so use argon2id, which has no such limit.
+      SFTPGO_DATA_PROVIDER__PASSWORD_HASHING__ALGO: argon2id
+
+  proxy:
+    environment:
+      # Must match the "iss" claim of tokens (Keycloak KC_HOSTNAME + realm).
+      OIDC_ISSUER: ${OIDC_ISSUER:-http://localhost:8180/realms/mlw}
+      # Keys are fetched over the compose network rather than via localhost.
+      OIDC_JWKS_URL: ${OIDC_JWKS_URL:-http://keycloak:8080/realms/mlw/protocol/openid-connect/certs}
+      OIDC_REQUIRED_ROLE: ${OIDC_REQUIRED_ROLE:-mlw-user}
+      OIDC_READONLY_ROLE: ${OIDC_READONLY_ROLE:-}
+      OIDC_ALLOWED_CLIENTS: ${OIDC_ALLOWED_CLIENTS:-}
+      # Users start in /srv/sftpgo/users/<sub>, or choose an existing directory
+      # under /srv/sftpgo/shared (./data/shared on the host) through the API.
+      STORAGE_USERS_DIR: /srv/sftpgo/users
+      STORAGE_SHARED_DIR: /srv/sftpgo/shared
+      STORAGE_STATE_FILE: /var/lib/mlw-proxy/roots.json
+    volumes:
+      # Same path as in the sftpgo service, read-only: the proxy validates the
+      # directories users choose but never writes files.
+      - ./data:/srv/sftpgo:ro
+      - proxy-state:/var/lib/mlw-proxy   # users' chosen directories
+    networks:
+      - default
+      - keycloak
+
+volumes:
+  proxy-state:
+
+networks:
+  keycloak:
+    name: mlw-platform_default
+    external: true
