@@ -198,6 +198,12 @@ func serveTCP(ctx context.Context, listen, upstream string) error {
 	if err != nil {
 		return err
 	}
+	return serveListener(ctx, ln, upstream)
+}
+
+// serveListener relays connections accepted on ln to upstream until ctx is
+// cancelled, then closes ln.
+func serveListener(ctx context.Context, ln net.Listener, upstream string) error {
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
