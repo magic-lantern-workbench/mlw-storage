@@ -1,6 +1,9 @@
 # mlw-storage
 Storage management for Magic Lantern Workbench
 
+See the [architecture document](doc/mlw-platform_Architecture.docx) for how the
+platform fits together.
+
 ## Running SFTPGo
 
 Requires Docker with Compose.
