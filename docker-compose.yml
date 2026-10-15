@@ -18,5 +18,18 @@ services:
       - ./data:/srv/sftpgo        # user home directories / uploaded files
       - sftpgo-config:/var/lib/sftpgo  # database, host keys, state
 
+  proxy:
+    build: ./src
+    container_name: mlw-proxy
+    restart: unless-stopped
+    depends_on:
+      - sftpgo
+    ports:
+      - "8380:8000"   # HTTP reverse proxy (web UI / REST API / WebClient)
+      - "2222:2222"   # SFTP proxy for remote servers
+    environment:
+      UPSTREAM_HTTP: http://sftpgo:8080
+      UPSTREAM_SFTP: sftpgo:2022
+
 volumes:
   sftpgo-config:

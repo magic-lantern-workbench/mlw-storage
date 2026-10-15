@@ -35,3 +35,35 @@ password in the web admin; editing `.env` has no effect.
 
 Stop the service with `docker compose down` (add `-v` to also delete the
 config volume).
+
+## Proxy gateway
+
+The Go application in `src/` runs as the `proxy` service in
+`docker-compose.yml` and sits in front of SFTPGo. It is built automatically by
+`docker compose up -d --build`.
+
+| Host port | Purpose                                                  |
+|-----------|----------------------------------------------------------|
+| 8380      | HTTP reverse proxy to SFTPGo (web admin, WebClient, REST API) |
+| 2222      | SFTP proxy: remote servers connect here to transfer files |
+
+Remote servers use any SFTP client against the gateway, for example:
+
+```bash
+sftp -P 2222 <user>@<gateway-host>
+```
+
+Users are created in the SFTPGo web admin; authentication is still handled by
+SFTPGo. The gateway also serves `GET /healthz` on the HTTP port.
+
+Configuration (environment variables on the `proxy` service):
+
+| Variable            | Default               | Meaning                    |
+|---------------------|-----------------------|----------------------------|
+| `PROXY_HTTP_LISTEN` | `:8000`               | HTTP listen address        |
+| `PROXY_SFTP_LISTEN` | `:2222`               | SFTP listen address        |
+| `UPSTREAM_HTTP`     | `http://sftpgo:8080`  | SFTPGo web/API endpoint    |
+| `UPSTREAM_SFTP`     | `sftpgo:2022`         | SFTPGo SFTP endpoint       |
+
+The gateway does not add authentication or rate limiting of its own. SFTPGo's
+own ports (8280, 2022) are still published on the host.
