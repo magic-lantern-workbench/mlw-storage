@@ -34,3 +34,6 @@ go.work.sum
 
 # SFTPGo uploaded files
 /data/
+
+# LibreOffice lock files
+.~lock.*#
