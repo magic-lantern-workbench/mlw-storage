@@ -63,5 +63,27 @@ Configuration (environment variables on the `proxy` service):
 | `UPSTREAM_HTTP`     | `http://sftpgo:8080`  | SFTPGo web/API endpoint    |
 | `UPSTREAM_SFTP`     | `sftpgo:2022`         | SFTPGo SFTP endpoint       |
 
+### Optional: FTP and WebDAV
+
+FTP and WebDAV are **disabled by default**. Enable them in `.env` and run
+`docker compose up -d`:
+
+```bash
+FTP_PORT=2121                 # enables FTP via the gateway
+FTP_PASSIVE_IP=203.0.113.10   # public IP/hostname clients use to reach the gateway
+WEBDAV_PORT=10080             # enables WebDAV via the gateway
+```
+
+| Host port    | Purpose                              |
+|--------------|--------------------------------------|
+| 2121         | FTP control (when `FTP_PORT=2121`)   |
+| 50000-50009  | FTP passive data (relayed 1:1)       |
+| 10080        | WebDAV (when `WEBDAV_PORT=10080`)    |
+
+Use exactly these port values; the host port mappings are fixed. The ports are
+always published, but the gateway only listens on them when enabled, so
+connections are refused while disabled. Plain FTP is unencrypted; prefer SFTP
+unless a client requires FTP.
+
 The gateway does not add authentication or rate limiting of its own. It is the
 only entry point: SFTPGo's own ports are not published on the host.

@@ -7,9 +7,17 @@ services:
     expose:
       - "8080"   # Web admin / WebClient
       - "2022"   # SFTP
+      - "2121"   # FTP (only listens when FTP_PORT=2121)
+      - "10080"  # WebDAV (only listens when WEBDAV_PORT=10080)
     environment:
       SFTPGO_HTTPD__BINDINGS__0__PORT: 8080
       SFTPGO_SFTPD__BINDINGS__0__PORT: 2022
+      # FTP and WebDAV are disabled (port 0) unless enabled in .env
+      SFTPGO_FTPD__BINDINGS__0__PORT: ${FTP_PORT:-0}
+      SFTPGO_FTPD__BINDINGS__0__FORCE_PASSIVE_IP: ${FTP_PASSIVE_IP:-}
+      SFTPGO_FTPD__PASSIVE_PORT_RANGE__START: 50000
+      SFTPGO_FTPD__PASSIVE_PORT_RANGE__END: 50009
+      SFTPGO_WEBDAVD__BINDINGS__0__PORT: ${WEBDAV_PORT:-0}
       # Optional: create the first admin automatically
       SFTPGO_DEFAULT_ADMIN_USERNAME: ${SFTPGO_ADMIN_USER:-admin}
       SFTPGO_DEFAULT_ADMIN_PASSWORD: ${SFTPGO_ADMIN_PASSWORD:?set SFTPGO_ADMIN_PASSWORD in .env}
@@ -26,9 +34,18 @@ services:
     ports:
       - "8380:8000"   # HTTP reverse proxy (web UI / REST API / WebClient)
       - "2222:2222"   # SFTP proxy for remote servers
+      # FTP / WebDAV: published, but the proxy only listens when enabled in .env
+      - "2121:2121"                 # FTP control
+      - "50000-50009:50000-50009"   # FTP passive data
+      - "10080:10080"               # WebDAV
     environment:
       UPSTREAM_HTTP: http://sftpgo:8080
       UPSTREAM_SFTP: sftpgo:2022
+      PROXY_FTP_LISTEN: ${FTP_PORT:-0}
+      UPSTREAM_FTP: sftpgo:2121
+      PROXY_FTP_PASV_RANGE: 50000-50009
+      PROXY_WEBDAV_LISTEN: ${WEBDAV_PORT:-0}
+      UPSTREAM_WEBDAV: http://sftpgo:10080
 
 volumes:
   sftpgo-config:
