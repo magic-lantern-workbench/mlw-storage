@@ -1,16 +1,19 @@
 # mlw-storage
 Storage management for Magic Lantern Workbench
 
-See the [architecture document](doc/mlw-platform_Architecture.docx) for how the
-platform fits together.
+See the [architecture document](doc/mlw-storage_Architecture.docx) for how the
+platform fits together, and the [testing document](doc/mlw-storage_Testing.docx)
+for how to verify it.
 
 ## Running SFTPGo
 
 Requires Docker with Compose.
 
-1. Create your environment file and set the admin password:
+1. Create the data directory (so it is owned by you, not root; SFTPGo runs as
+   uid 1000) and your environment file, then set the admin password:
 
    ```bash
+   mkdir -p data
    cp .env.example .env
    # edit .env and set SFTPGO_ADMIN_PASSWORD
    ```
@@ -84,8 +87,9 @@ WEBDAV_PORT=10080             # enables WebDAV via the gateway
 | 10080        | WebDAV (when `WEBDAV_PORT=10080`)    |
 
 Use exactly these port values; the host port mappings are fixed. The ports are
-always published, but the gateway only listens on them when enabled, so
-connections are refused while disabled. Plain FTP is unencrypted; prefer SFTP
+always published, but the gateway only listens on them when enabled. While
+disabled, Docker accepts a connection and immediately closes it; nothing is
+served. Plain FTP is unencrypted; prefer SFTP
 unless a client requires FTP.
 
 The gateway does not add authentication or rate limiting of its own. It is the
