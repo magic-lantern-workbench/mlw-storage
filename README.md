@@ -111,7 +111,10 @@ How it works:
   internal-only port). The gateway checks the token's signature against the
   realm's keys, issuer, expiry and that it is an access token, and that the
   username equals `sub`. The user must hold the realm role `mlw-user`.
-- SFTPGo creates the user on first login. The user's SFTP root is either their
+- SFTPGo creates the user on first login, with the Description field set to the
+  token's name and e-mail (`Name <email>`, from the `name` or `given_name` and
+  `family_name` claims and `email`), so an administrator can tell whose directory a
+  user id is; it is refreshed at each login. The user's SFTP root is either their
   own private directory `data/users/<sub>` (empty at first) or an existing
   directory they chose (see below). Files are saved there, on the local file
   system. If `OIDC_READONLY_ROLE` is set, users with that role can only list and

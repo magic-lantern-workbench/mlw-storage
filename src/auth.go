@@ -111,9 +111,31 @@ type tokenClaims struct {
 	Typ               string `json:"typ"`
 	AZP               string `json:"azp"`
 	PreferredUsername string `json:"preferred_username"`
+	Name              string `json:"name"`
+	GivenName         string `json:"given_name"`
+	FamilyName        string `json:"family_name"`
+	Email             string `json:"email"`
 	RealmAccess       struct {
 		Roles []string `json:"roles"`
 	} `json:"realm_access"`
+}
+
+// description is what the SFTPGo user's Description field shows, so an
+// administrator can tell whose directory a user id is: "Name <email>", or
+// whichever of the two the token carries (nothing if it carries neither).
+func (c *tokenClaims) description() string {
+	name := strings.TrimSpace(c.Name)
+	if name == "" {
+		name = strings.TrimSpace(c.GivenName + " " + c.FamilyName)
+	}
+	switch email := strings.TrimSpace(c.Email); {
+	case name != "" && email != "":
+		return name + " <" + email + ">"
+	case name != "":
+		return name
+	default:
+		return email
+	}
 }
 
 func (c *tokenClaims) hasRole(role string) bool {
@@ -192,6 +214,7 @@ type hookUser struct {
 	Status      int                 `json:"status"`
 	Username    string              `json:"username"`
 	HomeDir     string              `json:"home_dir"`
+	Description string              `json:"description,omitempty"`
 	Permissions map[string][]string `json:"permissions"`
 }
 
@@ -254,6 +277,7 @@ func authHook(v *verifier, st *storage) http.Handler {
 			Status:      1,
 			Username:    claims.Subject,
 			HomeDir:     home,
+			Description: claims.description(),
 			Permissions: map[string][]string{"/": perms},
 		})
 	})

@@ -388,3 +388,36 @@ func testStorage(t *testing.T) *storage {
 	}
 	return st
 }
+
+func TestAuthHookDescription(t *testing.T) {
+	k := newTestKey(t, "k1")
+	srv := newJWKSServer(t, k)
+	const sub = "6b1f7c1e-0000-4000-8000-000000000002"
+	cases := []struct {
+		name   string
+		extra  map[string]any
+		expect string
+	}{
+		{"name and email", map[string]any{"name": "Mark Millard", "email": "mark@example.org"}, "Mark Millard <mark@example.org>"},
+		{"given and family name", map[string]any{"given_name": "Ada", "family_name": "Lovelace", "email": "ada@example.org"}, "Ada Lovelace <ada@example.org>"},
+		{"email only", map[string]any{"email": "ada@example.org"}, "ada@example.org"},
+		{"name only", map[string]any{"name": "Ada Lovelace"}, "Ada Lovelace"},
+		{"neither", nil, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			claims := claimsMap(sub, "mlw-user")
+			for key, v := range c.extra {
+				claims[key] = v
+			}
+			h := authHook(newTestVerifier(srv.URL, nil), testStorage(t))
+			rec := callHook(t, h, http.MethodPost, map[string]string{"username": sub, "password": sign(t, k, claims), "protocol": "SSH", "ip": "10.0.0.1"})
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d: %s", rec.Code, rec.Body)
+			}
+			if got := decodeUser(t, rec).Description; got != c.expect {
+				t.Errorf("description = %q, want %q", got, c.expect)
+			}
+		})
+	}
+}
