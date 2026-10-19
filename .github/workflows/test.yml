@@ -65,5 +65,15 @@ jobs:
         run: docker compose -f docker-compose.yml -f docker-compose.keycloak.yml config -q
         env:
           SFTPGO_ADMIN_PASSWORD: ci-placeholder
+      - name: Validate production compose file
+        run: docker compose -f docker-compose.prod.yml config -q
+        env:
+          SFTPGO_ADMIN_PASSWORD: ci-placeholder
+          SFTPGO_VERSION: v2.0.0
+      - name: Validate production compose file with Keycloak override
+        run: docker compose -f docker-compose.prod.yml -f docker-compose.keycloak.yml config -q
+        env:
+          SFTPGO_ADMIN_PASSWORD: ci-placeholder
+          SFTPGO_VERSION: v2.0.0
       - name: Build gateway image
         run: docker build -t mlw-proxy ./src

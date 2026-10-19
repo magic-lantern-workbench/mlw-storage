@@ -187,3 +187,39 @@ Notes:
 
 The gateway does not add authentication or rate limiting of its own. It is the
 only entry point: SFTPGo's own ports are not published on the host.
+
+## Production deployment
+
+`docker-compose.prod.yml` is a standalone file for production releases. Use it
+instead of `docker-compose.yml`, not together with it. It pins image versions,
+hardens the containers (no new privileges, dropped capabilities, read-only
+gateway file system), rotates logs and restarts the services `always`.
+
+1. Create `.env` as above and set, in addition to `SFTPGO_ADMIN_PASSWORD`:
+
+   ```bash
+   SFTPGO_VERSION=v2.x.y   # required: a pinned SFTPGo tag from Docker Hub
+   MLW_VERSION=1.0.0       # optional: tag for the locally built gateway image
+   MLW_BIND_ADDR=0.0.0.0   # optional: host address the gateway's ports bind to
+   ```
+
+2. Create the data directory and start the stack:
+
+   ```bash
+   mkdir -p data
+   docker compose -f docker-compose.prod.yml up -d --build
+   ```
+
+To add Keycloak login (see above), pass the override file as well, instead of
+setting `COMPOSE_FILE` for the development file:
+
+```bash
+docker compose -f docker-compose.prod.yml -f docker-compose.keycloak.yml up -d --build
+```
+
+Ports, the optional FTP and WebDAV settings and the first-start admin account
+behave as in development. Set `MLW_BIND_ADDR` to an internal interface address
+to keep the gateway off public networks, and put a TLS-terminating reverse
+proxy in front of port 8380 for the web admin, since the gateway itself serves
+plain HTTP. To upgrade, change `SFTPGO_VERSION` (and `MLW_VERSION` for a new
+gateway build) and run the same `up -d --build` command.

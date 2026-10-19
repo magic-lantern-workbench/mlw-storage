@@ -1,0 +1,112 @@
+# COPYRIGHT_BEGIN
+# MIT License
+#
+# Copyright (c) 2026 Wizzer Works
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# COPYRIGHT_END
+
+# Production release stack.
+#
+# Standalone (do not combine with docker-compose.yml). Differences from the
+# development file:
+#   - versions are pinned (SFTPGO_VERSION is required; MLW_VERSION tags the
+#     gateway image built from ./src)
+#   - containers are hardened (no new privileges, dropped capabilities, read-only
+#     gateway file system) and logs are rotated
+#   - SFTPGo's admin password is required and no host ports other than the
+#     gateway's are opened; MLW_BIND_ADDR restricts them to one host address
+#
+# Usage:
+#   cp .env.example .env     # set SFTPGO_ADMIN_PASSWORD, SFTPGO_VERSION, ...
+#   mkdir -p data            # owned by uid 1000
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# To add Keycloak token login, also pass the override:
+#   docker compose -f docker-compose.prod.yml -f docker-compose.keycloak.yml up -d --build
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  sftpgo:
+    image: drakkan/sftpgo:${SFTPGO_VERSION:?set SFTPGO_VERSION in .env (a pinned v2.x.y tag)}
+    container_name: sftpgo
+    restart: always
+    logging: *logging
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # No published ports: reach SFTPGo through the proxy service.
+    expose:
+      - "8080"   # Web admin / WebClient
+      - "2022"   # SFTP
+      - "2121"   # FTP (only listens when FTP_PORT=2121)
+      - "10080"  # WebDAV (only listens when WEBDAV_PORT=10080)
+    environment:
+      SFTPGO_HTTPD__BINDINGS__0__PORT: 8080
+      SFTPGO_SFTPD__BINDINGS__0__PORT: 2022
+      # FTP and WebDAV are disabled (port 0) unless enabled in .env
+      SFTPGO_FTPD__BINDINGS__0__PORT: ${FTP_PORT:-0}
+      SFTPGO_FTPD__BINDINGS__0__FORCE_PASSIVE_IP: ${FTP_PASSIVE_IP:-}
+      SFTPGO_FTPD__PASSIVE_PORT_RANGE__START: 50000
+      SFTPGO_FTPD__PASSIVE_PORT_RANGE__END: 50009
+      SFTPGO_WEBDAVD__BINDINGS__0__PORT: ${WEBDAV_PORT:-0}
+      # The first admin is created on first start only
+      SFTPGO_DEFAULT_ADMIN_USERNAME: ${SFTPGO_ADMIN_USER:-admin}
+      SFTPGO_DEFAULT_ADMIN_PASSWORD: ${SFTPGO_ADMIN_PASSWORD:?set SFTPGO_ADMIN_PASSWORD in .env}
+    volumes:
+      - ./data:/srv/sftpgo        # user home directories / uploaded files
+      - sftpgo-config:/var/lib/sftpgo  # database, host keys, state
+
+  proxy:
+    build: ./src
+    image: mlw-storage-proxy:${MLW_VERSION:-1.0.0}
+    container_name: mlw-proxy
+    restart: always
+    logging: *logging
+    depends_on:
+      - sftpgo
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    ports:
+      - "${MLW_BIND_ADDR:-0.0.0.0}:8380:8000"   # HTTP reverse proxy (web UI / REST API / WebClient)
+      - "${MLW_BIND_ADDR:-0.0.0.0}:2222:2222"   # SFTP proxy for remote servers
+      # FTP / WebDAV: published, but the proxy only listens when enabled in .env
+      - "${MLW_BIND_ADDR:-0.0.0.0}:2121:2121"                 # FTP control
+      - "${MLW_BIND_ADDR:-0.0.0.0}:50000-50009:50000-50009"   # FTP passive data
+      - "${MLW_BIND_ADDR:-0.0.0.0}:10080:10080"               # WebDAV
+    environment:
+      UPSTREAM_HTTP: http://sftpgo:8080
+      UPSTREAM_SFTP: sftpgo:2022
+      PROXY_FTP_LISTEN: ${FTP_PORT:-0}
+      UPSTREAM_FTP: sftpgo:2121
+      PROXY_FTP_PASV_RANGE: 50000-50009
+      PROXY_WEBDAV_LISTEN: ${WEBDAV_PORT:-0}
+      UPSTREAM_WEBDAV: http://sftpgo:10080
+
+volumes:
+  sftpgo-config:
