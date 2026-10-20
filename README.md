@@ -26,8 +26,10 @@ Requires Docker with Compose.
    docker compose up -d
    ```
 
-3. Open the web admin at http://localhost:8380 (via the proxy gateway) and log in as `admin`
-   (or the value of `SFTPGO_ADMIN_USER`) with your password.
+3. Open http://localhost:8380 (via the proxy gateway). It shows the mlw-storage
+   sign-in page (see [Web UI](#web-ui)); sign in as `admin` (or the value of
+   `SFTPGO_ADMIN_USER`) with your password. The SFTPGo web admin is at
+   http://localhost:8380/web/admin/ and has its own sign-in.
 
 SFTPGo's own ports are not published on the host; reach it through the proxy
 gateway (see below): web admin on 8380, SFTP on 2222.
@@ -70,6 +72,26 @@ Configuration (environment variables on the `proxy` service):
 | `PROXY_SFTP_LISTEN` | `:2222`               | SFTP listen address        |
 | `UPSTREAM_HTTP`     | `http://sftpgo:8080`  | SFTPGo web/API endpoint    |
 | `UPSTREAM_SFTP`     | `sftpgo:2022`         | SFTPGo SFTP endpoint       |
+| `PROXY_UI`          | `true`                | `false` disables the mlw-storage web UI |
+
+### Web UI
+
+The gateway serves a small mlw-storage web UI on the HTTP port, and `/`
+redirects to it:
+
+| Page | URL | Purpose |
+|------|-----|---------|
+| Sign in | `/mlw/login` | mlw-storage login; use the SFTPGo administrator credentials |
+| Dashboard | `/mlw/dashboard` | the home page after sign-in: a table of the SFTPGo users (Username, Status, Last login, Description) and the **SFTPGo administration** button, which opens SFTPGo's own admin console (`/web/admin/`, separate sign-in). |
+
+The gateway checks the credentials against SFTPGo's REST API and keeps the
+resulting API token on the server, behind an HttpOnly, SameSite=Strict session
+cookie; the session ends when the SFTPGo token expires (20 minutes by default) or
+on sign-out, and is lost when the gateway restarts. After 10 failed sign-ins
+from one address within 5 minutes, further attempts are refused for a while.
+The gateway serves plain HTTP; put TLS in front of it in production so the
+password and cookie are encrypted. Set `PROXY_UI=false` on the `proxy` service
+to turn the UI off, in which case `/` goes to SFTPGo as before.
 
 ### Optional: FTP and WebDAV
 
