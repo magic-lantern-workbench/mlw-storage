@@ -58,6 +58,7 @@ const (
 	uiAdminPath   = "/web/admin/"
 	uiUserPage    = 500             // users fetched per SFTPGo API call
 	uiMaxUsers    = 20000           // upper bound on users shown
+	uiPageSize    = 20              // users per Dashboard table
 	uiMaxFailures = 10              // failed logins per client address ...
 	uiFailWindow  = 5 * time.Minute // ... within this window
 )
@@ -298,7 +299,7 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = append(rows, row)
 	}
-	render(w, http.StatusOK, dashTmpl, page{Admin: s.admin, AdminURL: uiAdminPath, Users: rows,
+	render(w, http.StatusOK, dashTmpl, page{Admin: s.admin, AdminURL: uiAdminPath, Pages: paginate(rows),
 		Total: len(rows), ActiveCount: active, Generated: u.now().UTC().Format("2006-01-02 15:04:05 UTC")})
 }
 
@@ -376,6 +377,16 @@ func (u *ui) listUsers(token string) ([]sftpgoUser, error) {
 	return all, nil
 }
 
+// paginate splits rows into tables of uiPageSize users, labelled by range.
+func paginate(rows []userRow) []userPage {
+	var pages []userPage
+	for from := 0; from < len(rows); from += uiPageSize {
+		to := min(from+uiPageSize, len(rows))
+		pages = append(pages, userPage{Label: fmt.Sprintf("%d..%d", from+1, to), Rows: rows[from:to]})
+	}
+	return pages
+}
+
 // ---- helpers and templates ----------------------------------------------
 
 // sameOrigin accepts a state-changing request only if the browser says it came
@@ -398,6 +409,12 @@ func sameOrigin(r *http.Request) bool {
 	return err == nil && u.Host == r.Host
 }
 
+// userPage is one Dashboard table; Label is its range, such as "21..40".
+type userPage struct {
+	Label string
+	Rows  []userRow
+}
+
 type userRow struct {
 	Username, Status, LastLogin, Description string
 	Active                                   bool
@@ -405,7 +422,7 @@ type userRow struct {
 
 type page struct {
 	Admin, AdminURL, Error, Username string
-	Users                            []userRow
+	Pages                            []userPage
 	Total, ActiveCount               int
 	Generated                        string
 }
@@ -443,6 +460,14 @@ h1{font-size:24px;margin:0 0 4px;color:var(--brand)}
 .err{background:color-mix(in srgb,var(--bad) 12%,transparent);color:var(--bad);border:1px solid var(--bad);border-radius:8px;padding:10px 12px;margin-bottom:16px}
 table{width:100%;border-collapse:collapse}
 .wrap{overflow-x:auto}
+.tpage[hidden]{display:none}
+.pager{display:none;align-items:center;justify-content:center;gap:16px;padding:12px 0 2px}
+.js .pager{display:flex}
+.pager button{display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:50%;border:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer}
+.pager button:hover:not(:disabled){background:var(--bg)}
+.pager button:disabled{opacity:.35;cursor:default}
+.pager button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.range{min-width:96px;text-align:center;color:var(--muted);font-variant-numeric:tabular-nums}
 th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
 th{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
 .on-s{color:var(--ok);font-weight:600}.off-s{color:var(--bad);font-weight:600}
@@ -470,7 +495,12 @@ const uiHead = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 
 // menuJS closes the account menu on a click outside it or on Escape. The page's
 // Content-Security-Policy allows only this script, by hash.
-const menuJS = `document.addEventListener("click",function(e){var m=document.querySelector(".menu[open]");if(m&&!m.contains(e.target))m.removeAttribute("open")});` +
+const menuJS = `document.addEventListener("DOMContentLoaded",function(){var r=document.getElementById("pager");if(!r)return;` +
+	`var t=document.querySelectorAll(".tpage"),p=r.querySelector(".prev"),n=r.querySelector(".next"),l=r.querySelector(".range"),i=0;` +
+	`function show(k){i=k;for(var j=0;j<t.length;j++)t[j].hidden=j!==i;l.textContent=t[i].getAttribute("data-label");p.disabled=i===0;n.disabled=i===t.length-1}` +
+	`p.addEventListener("click",function(){if(i>0)show(i-1)});n.addEventListener("click",function(){if(i<t.length-1)show(i+1)});` +
+	`document.documentElement.className+=" js";show(0)});` +
+	`document.addEventListener("click",function(e){var m=document.querySelector(".menu[open]");if(m&&!m.contains(e.target))m.removeAttribute("open")});` +
 	`document.addEventListener("keydown",function(e){if(e.key==="Escape"){var m=document.querySelector(".menu[open]");if(m){m.removeAttribute("open");m.querySelector("summary").focus()}}});`
 
 var menuCSP = func() string {
@@ -502,10 +532,15 @@ var dashTmpl = mustPage("mlw-storage: Dashboard", uiBar+`<main><div class="head"
 <a class="btn" href="{{.AdminURL}}">SFTPGo administration</a></div>
 {{with .Error}}<div class="err" role="alert">{{.}}</div>{{else}}
 <div class="stats"><span><b>{{.Total}}</b> users</span><span><b>{{.ActiveCount}}</b> active</span><span>Updated {{.Generated}}</span></div>
-<div class="card wrap"><table><thead><tr><th>Username</th><th>Status</th><th>Last login</th><th>Description</th></tr></thead><tbody>
-{{range .Users}}<tr><td>{{.Username}}</td><td class="{{if .Active}}on-s{{else}}off-s{{end}}">{{.Status}}</td><td>{{.LastLogin}}</td><td>{{.Description}}</td></tr>
-{{else}}<tr><td colspan="4">No users yet. Create them in the SFTPGo administration console, or they appear after their first Keycloak login.</td></tr>{{end}}
-</tbody></table></div>{{end}}</main>`)
+<div class="card">
+{{range .Pages}}<div class="wrap tpage" data-label="{{.Label}}"><table><thead><tr><th>Username</th><th>Status</th><th>Last login</th><th>Description</th></tr></thead><tbody>
+{{range .Rows}}<tr><td>{{.Username}}</td><td class="{{if .Active}}on-s{{else}}off-s{{end}}">{{.Status}}</td><td>{{.LastLogin}}</td><td>{{.Description}}</td></tr>
+{{end}}</tbody></table></div>
+{{else}}<div class="wrap"><table><thead><tr><th>Username</th><th>Status</th><th>Last login</th><th>Description</th></tr></thead><tbody>
+<tr><td colspan="4">No users yet. Create them in the SFTPGo administration console, or they appear after their first Keycloak login.</td></tr>
+</tbody></table></div>{{end}}
+{{if .Pages}}<div class="pager" id="pager"><button type="button" class="prev" aria-label="Previous users" title="Previous" disabled><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button><span class="range" aria-live="polite">{{(index .Pages 0).Label}}</span><button type="button" class="next" aria-label="Next users" title="Next"{{if lt (len .Pages) 2}} disabled{{end}}><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button></div>{{end}}
+</div>{{end}}</main>`)
 
 // backLink is a small fixed button added to SFTPGo's admin pages so an
 // administrator can return to the mlw-storage Dashboard, including from

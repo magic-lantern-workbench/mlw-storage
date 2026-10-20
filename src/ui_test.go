@@ -401,3 +401,62 @@ func TestAddBackLink(t *testing.T) {
 		}
 	}
 }
+
+func TestUIDashboardPages(t *testing.T) {
+	var users []map[string]any
+	for i := 1; i <= 45; i++ {
+		users = append(users, map[string]any{"username": fmt.Sprintf("u%02d", i), "status": 1})
+	}
+	_, h := newUIServer(t, users)
+	c := login(t, h)
+	body := get(h, "/mlw/dashboard", c).Body.String()
+
+	if got := strings.Count(body, `class="wrap tpage"`); got != 3 {
+		t.Fatalf("got %d tables, want 3", got)
+	}
+	for _, label := range []string{`data-label="1..20"`, `data-label="21..40"`, `data-label="41..45"`} {
+		if !strings.Contains(body, label) {
+			t.Errorf("missing %s", label)
+		}
+	}
+	// 20 rows in each full table, 5 in the last; users stay in order across tables.
+	tables := strings.Split(body, `class="wrap tpage"`)[1:]
+	for i, want := range []int{20, 20, 5} {
+		if got := strings.Count(tables[i], "<tr><td>"); got != want {
+			t.Errorf("table %d has %d rows, want %d", i+1, got, want)
+		}
+	}
+	if !strings.Contains(tables[1], ">u21<") || !strings.Contains(tables[2], ">u45<") || strings.Contains(tables[0], ">u21<") {
+		t.Error("users are not split in order across tables")
+	}
+	// The pager starts on the first range with Previous disabled and Next enabled.
+	pager := body[strings.Index(body, `id="pager"`):]
+	if !strings.Contains(pager, `class="prev"`) || !strings.Contains(pager[:strings.Index(pager, `class="range"`)], "disabled") ||
+		!strings.Contains(pager, `class="range" aria-live="polite">1..20<`) || strings.Contains(pager[strings.Index(pager, `class="next"`):strings.Index(pager, `class="next"`)+120], "disabled") {
+		t.Errorf("pager initial state wrong: %.400s", pager)
+	}
+}
+
+func TestUIDashboardSinglePage(t *testing.T) {
+	users := []map[string]any{{"username": "a", "status": 1}, {"username": "b", "status": 1}}
+	_, h := newUIServer(t, users)
+	body := get(h, "/mlw/dashboard", login(t, h)).Body.String()
+	if strings.Count(body, `class="wrap tpage"`) != 1 || !strings.Contains(body, `aria-live="polite">1..2<`) {
+		t.Errorf("single page: %s", body)
+	}
+	if i := strings.Index(body, `class="next"`); !strings.Contains(body[i:i+120], "disabled") {
+		t.Error("Next should be disabled with one table")
+	}
+}
+
+func TestPaginate(t *testing.T) {
+	for n, want := range map[int][]string{0: nil, 1: {"1..1"}, 20: {"1..20"}, 21: {"1..20", "21..21"}, 40: {"1..20", "21..40"}} {
+		var labels []string
+		for _, p := range paginate(make([]userRow, n)) {
+			labels = append(labels, p.Label)
+		}
+		if strings.Join(labels, ",") != strings.Join(want, ",") {
+			t.Errorf("%d rows: %v, want %v", n, labels, want)
+		}
+	}
+}
