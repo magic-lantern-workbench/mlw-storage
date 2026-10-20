@@ -36,6 +36,7 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -415,7 +416,7 @@ func render(w http.ResponseWriter, status int, t *template.Template, p page) {
 	h.Set("Cache-Control", "no-store")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "same-origin")
-	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+	h.Set("Content-Security-Policy", menuCSP)
 	w.WriteHeader(status)
 	if err := t.Execute(w, p); err != nil {
 		log.Printf("ui render: %v", err)
@@ -446,7 +447,16 @@ th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vert
 th{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
 .on-s{color:var(--ok);font-weight:600}.off-s{color:var(--bad);font-weight:600}
 .stats{display:flex;gap:24px;margin-bottom:16px;color:var(--muted)}.stats b{color:var(--ink)}
-form.logout{margin:0}
+.menu{position:relative}
+.menu summary{list-style:none;display:flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:50%;border:1px solid var(--line);color:var(--ink);cursor:pointer}
+.menu summary::-webkit-details-marker{display:none}
+.menu summary:hover,.menu[open] summary{background:var(--bg)}
+.menu summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.drop{position:absolute;right:0;top:46px;min-width:160px;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.15);padding:6px;z-index:10}
+.drop form{margin:0}
+.uname{color:var(--ink);font-weight:600;max-width:40vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:-8px}
+.item{display:block;width:100%;text-align:left;background:transparent;color:var(--ink);border:0;border-radius:6px;padding:8px 10px;font:inherit;cursor:pointer}
+.item:hover,.item:focus-visible{background:var(--bg)}
 .login{max-width:380px;margin:12vh auto 0;padding:0 16px}
 label{display:block;font-size:14px;color:var(--muted);margin:14px 0 4px}
 input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit}
@@ -458,8 +468,21 @@ const uiHead = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{.Title}}</title><style>` + uiCSS + `</style></head><body>`
 
+// menuJS closes the account menu on a click outside it or on Escape. The page's
+// Content-Security-Policy allows only this script, by hash.
+const menuJS = `document.addEventListener("click",function(e){var m=document.querySelector(".menu[open]");if(m&&!m.contains(e.target))m.removeAttribute("open")});` +
+	`document.addEventListener("keydown",function(e){if(e.key==="Escape"){var m=document.querySelector(".menu[open]");if(m){m.removeAttribute("open");m.querySelector("summary").focus()}}});`
+
+var menuCSP = func() string {
+	sum := sha256.Sum256([]byte(menuJS))
+	return "default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) +
+		"'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+}()
+
 const uiBar = `<header><div class="bar"><span class="brand">mlw-storage<small>Magic Lantern Workbench</small></span>
-<form class="logout" method="post" action="/mlw/logout"><button class="btn ghost" type="submit">Sign out {{.Admin}}</button></form></div></header>`
+<span class="uname">{{.Admin}}</span><details class="menu"><summary aria-label="Account menu" title="Account"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3.2"/><path d="M5.8 18.6c1.4-2.4 3.6-3.6 6.2-3.6s4.8 1.2 6.2 3.6"/></svg></summary>
+<div class="drop"><form method="post" action="/mlw/logout"><button class="item" type="submit">Logout</button></form></div></details>
+<script>` + menuJS + `</script></div></header>`
 
 func mustPage(title, body string) *template.Template {
 	return template.Must(template.New("p").Parse(strings.Replace(uiHead, "{{.Title}}", title, 1) + body + `</body></html>`))

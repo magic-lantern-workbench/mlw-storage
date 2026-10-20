@@ -25,6 +25,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -203,6 +205,29 @@ func TestUIDashboard(t *testing.T) {
 	}
 	if strings.Index(body, "Alice") > strings.Index(body, "zed") {
 		t.Error("users not sorted by name")
+	}
+	for _, want := range []string{`aria-label="Account menu"`, `action="/mlw/logout"`, ">Logout<", `<span class="uname">admin</span>`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("account menu missing %q", want)
+		}
+	}
+	if strings.Contains(body, "Signed in as") {
+		t.Error("menu still has the 'Signed in as' line")
+	}
+	if strings.Index(body, `class="uname"`) > strings.Index(body, `class="menu"`) {
+		t.Error("user name should be left of the icon")
+	}
+	// The only script is the menu one, allowed by hash in the CSP.
+	if i, j := strings.Index(body, "<script>"), strings.Index(body, "</script>"); i < 0 || strings.Count(body, "<script") != 1 {
+		t.Error("expected exactly one script")
+	} else {
+		sum := sha256.Sum256([]byte(body[i+len("<script>") : j]))
+		if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "script-src 'sha256-"+base64.StdEncoding.EncodeToString(sum[:])+"'") {
+			t.Errorf("CSP does not allow the page script by hash: %q", csp)
+		}
+	}
+	if strings.Contains(body, "Sign out") {
+		t.Error("old Sign out button still present")
 	}
 	if strings.Contains(body, "tok123") {
 		t.Error("SFTPGo token leaked to the page")
