@@ -93,6 +93,50 @@ The gateway serves plain HTTP; put TLS in front of it in production so the
 password and cookie are encrypted. Set `PROXY_UI=false` on the `proxy` service
 to turn the UI off, in which case `/` goes to SFTPGo as before.
 
+### Optional: drive detection
+
+While mlw-storage runs it can notice physical drives (USB sticks, external or
+extra internal disks) that are mounted on the host, and offer them on a **Drives**
+page of the web UI, next to the Dashboard. It is **disabled by default**; enable
+it by adding the overlay file to `COMPOSE_FILE` in `.env`, then
+`docker compose up -d --build`:
+
+```bash
+COMPOSE_FILE=docker-compose.yml:docker-compose.media.yml
+# production:  docker-compose.prod.yml:docker-compose.media.yml
+# with Keycloak login, add :docker-compose.keycloak.yml
+# MLW_MEDIA_DIR=/run/media     # where your desktop mounts drives (default /media)
+```
+
+- **Detection:** the host's media directory (`/media`) is bind-mounted read-only
+  into the gateway container with `rslave` propagation, so drives the desktop
+  mounts there appear in the container's `/proc/self/mountinfo`. The gateway
+  sleeps in `epoll_wait` on that file (the kernel signals `POLLPRI|POLLERR` when
+  the mount table changes), so it uses no CPU until a drive is mounted or
+  unmounted. `/run/udev` and `/sys` (read-only) supply the label, UUID, model and
+  bus. The host's `/` must be a shared mount (`findmnt -no PROPAGATION /` prints
+  `shared` on systemd systems).
+- **Only physical volumes:** loop, RAM, zram and other virtual devices, network
+  shares and mounts outside the media directory are ignored. An unlocked
+  encrypted volume (device-mapper) counts when it sits on a physical disk.
+- **Enabling:** a new drive appears on the Drives page as *New: not enabled* and
+  as a red count on the **Drives** link. Nothing uses it until an administrator
+  presses **Enable**, which marks it *Available*. **Ignore** hides it, **Disable**
+  turns an available drive off. The page updates by itself when a drive is
+  mounted, unmounted or ejected: an enabled drive that is removed stays listed as
+  *Not mounted* (use **Remove** to forget it) and becomes *Available* again when
+  plugged back in.
+- **Remembered:** decisions are stored by filesystem UUID in the `proxy-state`
+  volume (`media.json`). Nothing is written to the drives, and SFTPGo is not
+  involved yet: enabling a drive does not publish its files.
+- **No desktop pop-up:** the gateway runs in a container, so the question is asked
+  on the Drives page, not as a desktop dialog.
+- Used space is shown when the container may read the mount point; udisks mounts
+  are often readable only by the logged-in user, in which case only the device size
+  is shown.
+- `MLW_MEDIA_INCLUDE_VIRTUAL=true` also reports loop devices, which is useful for
+  trying the feature without a physical drive (for example `udisksctl loop-setup`).
+
 ### Optional: FTP and WebDAV
 
 FTP and WebDAV are **disabled by default**. Enable them in `.env` and run

@@ -75,5 +75,12 @@ jobs:
         env:
           SFTPGO_ADMIN_PASSWORD: ci-placeholder
           SFTPGO_VERSION: v2.0.0
+      - name: Validate drive detection overlay
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.media.yml config -q
+          docker compose -f docker-compose.prod.yml -f docker-compose.keycloak.yml -f docker-compose.media.yml config -q
+        env:
+          SFTPGO_ADMIN_PASSWORD: ci-placeholder
+          SFTPGO_VERSION: v2.0.0
       - name: Build gateway image
         run: docker build -t mlw-proxy ./src

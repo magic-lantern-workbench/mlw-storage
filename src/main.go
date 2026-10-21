@@ -26,6 +26,8 @@
 //   - an HTTP reverse proxy for SFTPGo's web UI, REST API and WebClient
 //   - the mlw-storage web UI (login, Home, Dashboard) at /mlw/, which is also
 //     where / redirects; disable it with PROXY_UI=false
+//   - optionally (disabled by default) detection of physical drives mounted
+//     while it runs, offered for enabling on the web UI's Drives page
 //   - a TCP proxy for SFTP, so remote servers can transfer files through it
 //   - optionally (disabled by default) a TCP proxy for FTP, including the
 //     passive data port range, and an HTTP reverse proxy for WebDAV
@@ -94,7 +96,26 @@ func main() {
 	if env("PROXY_UI", "true") != "false" {
 		// SFTPGo's admin pages get a link back to the mlw-storage Dashboard.
 		mux.Handle("/", newHTTPProxyWith(target, addBackLink))
-		newUI(upstreamHTTP).register(mux)
+		ui := newUI(upstreamHTTP)
+		if dir := env("MEDIA_DIR", ""); dir != "" {
+			ms, err := newMediaStore(mediaConfig{
+				Dir:            dir,
+				HostDir:        env("MEDIA_HOST_DIR", dir),
+				StateFile:      env("MEDIA_STATE_FILE", "/var/lib/mlw-proxy/media.json"),
+				IncludeVirtual: env("MEDIA_INCLUDE_VIRTUAL", "") == "true",
+			})
+			if err != nil {
+				log.Fatalf("media: %v", err)
+			}
+			ui.media = ms
+			go func() {
+				if err := ms.watch(ctx); err != nil {
+					log.Printf("media: drive detection stopped: %v", err)
+				}
+			}()
+			log.Printf("media: watching mounts below %s (host %s) for physical drives", dir, ms.cfg.HostDir)
+		}
+		ui.register(mux)
 		log.Print("web UI at /mlw/ (/ redirects there)")
 	} else {
 		mux.Handle("/", newHTTPProxy(target))

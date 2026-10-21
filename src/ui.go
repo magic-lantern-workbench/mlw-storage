@@ -70,7 +70,8 @@ type uiSession struct {
 }
 
 type ui struct {
-	api    string // SFTPGo base URL, without trailing slash
+	api    string      // SFTPGo base URL, without trailing slash
+	media  *mediaStore // optional: physical drive detection (nil = feature off)
 	client *http.Client
 	now    func() time.Time
 
@@ -100,6 +101,9 @@ func (u *ui) register(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+uiPrefix+"login", u.login)
 	mux.HandleFunc("POST "+uiPrefix+"logout", u.logout)
 	mux.HandleFunc("GET "+uiPrefix+"dashboard", u.dashboard)
+	if u.media != nil {
+		u.registerDrives(mux)
+	}
 }
 
 // ---- sessions ------------------------------------------------------------
@@ -282,8 +286,8 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	case err != nil:
 		log.Printf("ui dashboard: %v", err)
-		render(w, http.StatusBadGateway, dashTmpl, page{Admin: s.admin, AdminURL: uiAdminPath,
-			Error: "Could not read the user list from SFTPGo."})
+		render(w, http.StatusBadGateway, dashTmpl, u.withNav(page{Admin: s.admin, AdminURL: uiAdminPath,
+			Error: "Could not read the user list from SFTPGo."}, "dashboard"))
 		return
 	}
 	rows := make([]userRow, 0, len(users))
@@ -299,8 +303,8 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = append(rows, row)
 	}
-	render(w, http.StatusOK, dashTmpl, page{Admin: s.admin, AdminURL: uiAdminPath, Pages: paginate(rows),
-		Total: len(rows), ActiveCount: active, Generated: u.now().UTC().Format("2006-01-02 15:04:05 UTC")})
+	render(w, http.StatusOK, dashTmpl, u.withNav(page{Admin: s.admin, AdminURL: uiAdminPath, Pages: paginate(rows),
+		Total: len(rows), ActiveCount: active, Generated: u.now().UTC().Format("2006-01-02 15:04:05 UTC")}, "dashboard"))
 }
 
 // ---- SFTPGo API ----------------------------------------------------------
@@ -422,12 +426,22 @@ type userRow struct {
 
 type page struct {
 	Admin, AdminURL, Error, Username string
+	Nav                              string // current page in the top bar
+	HasMedia                         bool   // show the Drives page
+	Pending                          int    // drives waiting for a decision
+	Drives                           []driveRow
 	Pages                            []userPage
 	Total, ActiveCount               int
 	Generated                        string
 }
 
 func render(w http.ResponseWriter, status int, t *template.Template, p page) {
+	renderNamed(w, status, t, "", p)
+}
+
+// renderNamed executes t, or its sub-template name if given, with the security
+// headers every UI response carries.
+func renderNamed(w http.ResponseWriter, status int, t *template.Template, name string, p page) {
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
@@ -435,7 +449,13 @@ func render(w http.ResponseWriter, status int, t *template.Template, p page) {
 	h.Set("Referrer-Policy", "same-origin")
 	h.Set("Content-Security-Policy", menuCSP)
 	w.WriteHeader(status)
-	if err := t.Execute(w, p); err != nil {
+	var err error
+	if name == "" {
+		err = t.Execute(w, p)
+	} else {
+		err = t.ExecuteTemplate(w, name, p)
+	}
+	if err != nil {
 		log.Printf("ui render: %v", err)
 	}
 }
@@ -447,7 +467,23 @@ const uiCSS = `
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 header{background:var(--card);border-bottom:1px solid var(--line)}
 .bar{max-width:1000px;margin:0 auto;padding:0 16px;display:flex;align-items:center;gap:20px;min-height:56px;flex-wrap:wrap}
-.brand{font-weight:700;color:var(--brand);font-size:18px;margin-right:auto}
+.brand{font-weight:700;color:var(--brand);font-size:18px}
+.grow{flex:1}
+nav{display:flex;gap:4px}
+nav a{color:var(--muted);text-decoration:none;padding:6px 10px;border-radius:8px;display:flex;align-items:center;gap:6px}
+nav a:hover{background:var(--bg)}
+nav a.on{color:var(--ink);background:var(--bg);font-weight:600}
+.badge{background:var(--bad);color:#fff;border-radius:999px;font-size:12px;font-weight:700;min-width:20px;height:20px;padding:0 6px;display:inline-flex;align-items:center;justify-content:center}
+.badge[hidden]{display:none}
+.pill{display:inline-block;border-radius:999px;padding:2px 10px;font-size:13px;font-weight:600;white-space:nowrap}
+.pill.new{background:color-mix(in srgb,var(--accent) 16%,transparent);color:var(--accent)}
+.pill.ok{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}
+.pill.off,.pill.ign{background:var(--bg);color:var(--muted);border:1px solid var(--line)}
+.note{background:color-mix(in srgb,var(--accent) 12%,transparent);border:1px solid var(--accent);border-radius:8px;padding:10px 12px;margin-bottom:16px}
+.dim{color:var(--muted);font-size:13px}
+.acts{white-space:nowrap;text-align:right}
+.acts form{display:inline;margin:0 0 0 6px}
+.acts .btn{padding:6px 12px;font-size:14px}
 .brand small{font-weight:400;color:var(--muted);margin-left:6px}
 main{max-width:1000px;margin:0 auto;padding:24px 16px}
 h1{font-size:24px;margin:0 0 4px;color:var(--brand)}
@@ -495,7 +531,14 @@ const uiHead = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 
 // menuJS closes the account menu on a click outside it or on Escape. The page's
 // Content-Security-Policy allows only this script, by hash.
-const menuJS = `document.addEventListener("DOMContentLoaded",function(){var r=document.getElementById("pager");if(!r)return;` +
+const menuJS = `function badge(n){var b=document.getElementById("pending");if(b){b.textContent=n;b.hidden=!n}}` +
+	`if(window.EventSource&&document.getElementById("nav-drives")){var es=new EventSource("/mlw/drives/events");` +
+	`es.onmessage=function(e){var d=JSON.parse(e.data);badge(d.pending);var c=document.getElementById("drives");` +
+	`if(c)fetch("/mlw/drives/table",{credentials:"same-origin"}).then(function(r){return r.ok?r.text():null}).then(function(h){if(h!==null)c.innerHTML=h})}}` +
+	`document.addEventListener("submit",function(e){var f=e.target;if(!f.classList||!f.classList.contains("act"))return;e.preventDefault();var b=f.querySelector("button");b.disabled=true;` +
+	`fetch(f.action,{method:"POST",body:new URLSearchParams(new FormData(f)),headers:{"X-Mlw-Fetch":"1"},credentials:"same-origin"})` +
+	`.then(function(r){if(!r.ok)return r.text().then(function(t){alert(t)})}).catch(function(){}).then(function(){b.disabled=false})});` +
+	`document.addEventListener("DOMContentLoaded",function(){var r=document.getElementById("pager");if(!r)return;` +
 	`var t=document.querySelectorAll(".tpage"),p=r.querySelector(".prev"),n=r.querySelector(".next"),l=r.querySelector(".range"),i=0;` +
 	`function show(k){i=k;for(var j=0;j<t.length;j++)t[j].hidden=j!==i;l.textContent=t[i].getAttribute("data-label");p.disabled=i===0;n.disabled=i===t.length-1}` +
 	`p.addEventListener("click",function(){if(i>0)show(i-1)});n.addEventListener("click",function(){if(i<t.length-1)show(i+1)});` +
@@ -506,11 +549,12 @@ const menuJS = `document.addEventListener("DOMContentLoaded",function(){var r=do
 var menuCSP = func() string {
 	sum := sha256.Sum256([]byte(menuJS))
 	return "default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) +
-		"'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+		"'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 }()
 
 const uiBar = `<header><div class="bar"><span class="brand">mlw-storage<small>Magic Lantern Workbench</small></span>
-<span class="uname">{{.Admin}}</span><details class="menu"><summary aria-label="Account menu" title="Account"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3.2"/><path d="M5.8 18.6c1.4-2.4 3.6-3.6 6.2-3.6s4.8 1.2 6.2 3.6"/></svg></summary>
+{{if .HasMedia}}<nav><a href="/mlw/dashboard"{{if eq .Nav "dashboard"}} class="on"{{end}}>Dashboard</a><a id="nav-drives" href="/mlw/drives"{{if eq .Nav "drives"}} class="on"{{end}}>Drives<span class="badge" id="pending"{{if not .Pending}} hidden{{end}}>{{.Pending}}</span></a></nav>{{end}}
+<span class="grow"></span><span class="uname">{{.Admin}}</span><details class="menu"><summary aria-label="Account menu" title="Account"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3.2"/><path d="M5.8 18.6c1.4-2.4 3.6-3.6 6.2-3.6s4.8 1.2 6.2 3.6"/></svg></summary>
 <div class="drop"><form method="post" action="/mlw/logout"><button class="item" type="submit">Logout</button></form></div></details>
 <script>` + menuJS + `</script></div></header>`
 
