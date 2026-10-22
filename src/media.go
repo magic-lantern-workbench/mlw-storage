@@ -69,6 +69,7 @@ type mediaConfig struct {
 	Sys            string // normally /sys
 	Udev           string // normally /run/udev (optional, adds label, UUID, model)
 	IncludeVirtual bool   // testing aid: also report loop and other virtual devices
+	SFTPGoDir      string // the media directory as seen by SFTPGo; "" = enabling a drive does not publish it
 }
 
 func (c mediaConfig) withDefaults() mediaConfig {
@@ -111,10 +112,24 @@ type Drive struct {
 	HasUsage   bool
 	Mounted    bool
 	Manual     bool // added by an administrator rather than detected
+	Share      *share
 	State      string
 	Admin      string // who decided
 	Decided    time.Time
 }
+
+// share is how an enabled drive is published through SFTPGo: one SFTPGo
+// virtual folder, shown to the chosen users and Keycloak roles at VPath.
+type share struct {
+	Slug     string   `json:"slug"`
+	Mapped   string   `json:"mapped_path"` // where SFTPGo sees the drive
+	Users    []string `json:"users,omitempty"`
+	Roles    []string `json:"roles,omitempty"`
+	ReadOnly bool     `json:"read_only,omitempty"`
+}
+
+func (sh share) Folder() string { return "mlw-drive-" + sh.Slug }
+func (sh share) VPath() string  { return "/drives/" + sh.Slug }
 
 // known is what is remembered about a decision.
 type known struct {
@@ -127,6 +142,7 @@ type known struct {
 	Model      string    `json:"model"`
 	Size       uint64    `json:"size"`
 	Manual     bool      `json:"manual,omitempty"`
+	Share      *share    `json:"share,omitempty"` // how the drive is published through SFTPGo
 	Admin      string    `json:"admin"`
 	Decided    time.Time `json:"decided"`
 }
@@ -438,6 +454,17 @@ func (s *mediaStore) save() error {
 	return os.Rename(tmp, s.cfg.StateFile)
 }
 
+// newKnown is the remembered entry for a mounted drive d after a decision. The
+// share survives only while the drive stays available.
+func (s *mediaStore) newKnown(d *Drive, prev known, state, admin string) known {
+	kn := known{State: state, Manual: prev.Manual, Name: d.Name, Device: d.Device, MountPoint: d.MountPoint, FSType: d.FSType,
+		Bus: d.Bus, Model: d.Model, Size: d.Size, Admin: admin, Decided: s.now().UTC()}
+	if state == driveAvailable {
+		kn.Share = prev.Share
+	}
+	return kn
+}
+
 var errNoSuchDrive = errors.New("that drive is not mounted")
 
 // decide records an administrator's choice for a drive that is mounted now.
@@ -451,6 +478,9 @@ func (s *mediaStore) decide(key, state, admin string) error {
 			return errNoSuchDrive
 		}
 		kn.State, kn.Admin, kn.Decided = state, admin, s.now().UTC()
+		if state != driveAvailable {
+			kn.Share = nil
+		}
 		s.known[key] = kn
 		if err := s.save(); err != nil {
 			return err
@@ -459,8 +489,7 @@ func (s *mediaStore) decide(key, state, admin string) error {
 		s.notifyLocked()
 		return nil
 	}
-	s.known[key] = known{State: state, Manual: s.known[key].Manual, Name: d.Name, Device: d.Device, MountPoint: d.MountPoint, FSType: d.FSType,
-		Bus: d.Bus, Model: d.Model, Size: d.Size, Admin: admin, Decided: s.now().UTC()}
+	s.known[key] = s.newKnown(d, s.known[key], state, admin)
 	if err := s.save(); err != nil {
 		return err
 	}
@@ -612,7 +641,7 @@ func (s *mediaStore) snapshot() []Drive {
 		c := *d
 		c.State = driveNew
 		if kn, ok := s.known[k]; ok {
-			c.State, c.Admin, c.Decided, c.Manual = kn.State, kn.Admin, kn.Decided, kn.Manual
+			c.State, c.Admin, c.Decided, c.Manual, c.Share = kn.State, kn.Admin, kn.Decided, kn.Manual, kn.Share
 		}
 		out = append(out, c)
 	}
@@ -620,7 +649,7 @@ func (s *mediaStore) snapshot() []Drive {
 		if _, here := s.mounted[k]; here || (kn.State != driveAvailable && !kn.Manual) {
 			continue
 		}
-		out = append(out, Drive{Key: k, Manual: kn.Manual, Name: kn.Name, Device: kn.Device, MountPoint: kn.MountPoint, FSType: kn.FSType,
+		out = append(out, Drive{Key: k, Manual: kn.Manual, Share: kn.Share, Name: kn.Name, Device: kn.Device, MountPoint: kn.MountPoint, FSType: kn.FSType,
 			Bus: kn.Bus, Model: kn.Model, Size: kn.Size, State: kn.State, Admin: kn.Admin, Decided: kn.Decided})
 	}
 	s.mu.Unlock()

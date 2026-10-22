@@ -93,21 +93,28 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok\n")
 	})
+	var drives driveGranter // set when drives are published through SFTPGo
 	if env("PROXY_UI", "true") != "false" {
 		// SFTPGo's admin pages get a link back to the mlw-storage Dashboard.
 		mux.Handle("/", newHTTPProxyWith(target, addBackLink))
 		ui := newUI(upstreamHTTP)
+		ui.roles = oidcIssuer != ""
 		if dir := env("MEDIA_DIR", ""); dir != "" {
 			ms, err := newMediaStore(mediaConfig{
 				Dir:            dir,
 				HostDir:        env("MEDIA_HOST_DIR", dir),
 				StateFile:      env("MEDIA_STATE_FILE", "/var/lib/mlw-proxy/media.json"),
 				IncludeVirtual: env("MEDIA_INCLUDE_VIRTUAL", "") == "true",
+				SFTPGoDir:      strings.TrimRight(env("MEDIA_SFTPGO_DIR", ""), "/"),
 			})
 			if err != nil {
 				log.Fatalf("media: %v", err)
 			}
 			ui.media = ms
+			if ms.cfg.SFTPGoDir != "" {
+				drives = ms
+				log.Printf("media: enabled drives are published to SFTPGo under %s", ms.cfg.SFTPGoDir)
+			}
 			go func() {
 				if err := ms.watch(ctx); err != nil {
 					log.Printf("media: drive detection stopped: %v", err)
@@ -186,7 +193,11 @@ func main() {
 	var authSrv *http.Server
 	if oidcIssuer != "" {
 		amux := http.NewServeMux()
-		amux.Handle("/auth", authHook(ver, st))
+		if drives != nil {
+			amux.Handle("/auth", authHook(ver, st, drives))
+		} else {
+			amux.Handle("/auth", authHook(ver, st))
+		}
 		authSrv = &http.Server{
 			Addr:              authListen,
 			Handler:           amux,

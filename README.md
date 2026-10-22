@@ -119,25 +119,46 @@ COMPOSE_FILE=docker-compose.yml:docker-compose.media.yml
 - **Only physical volumes:** loop, RAM, zram and other virtual devices, network
   shares and mounts outside the media directory are ignored. An unlocked
   encrypted volume (device-mapper) counts when it sits on a physical disk.
-- **Enabling:** a new drive appears on the Drives page as *New: not enabled* and
-  as a red count on the **Drives** link. Nothing uses it until an administrator
-  presses **Enable**, which marks it *Available*. **Ignore** hides it, **Disable**
-  turns an available drive off. The page updates by itself when a drive is
-  mounted, unmounted or ejected: an enabled drive that is removed stays listed as
-  *Not mounted* (use **Remove** to forget it) and becomes *Available* again when
-  plugged back in.
+- **Enabling and publishing:** a new drive appears on the Drives page as *New:
+  not enabled* and as a red count on the **Drives** link. **Enable** opens the
+  Access page, where you choose the **users** (and, with Keycloak login on, the
+  **Keycloak realm roles**) who get the drive, and whether it is **read-only**
+  (default: read-write). On save the gateway creates an SFTPGo virtual folder
+  `mlw-drive-<name>` for the drive and attaches it to those users at
+  `/drives/<name>`; role members get it when they sign in. The drive is then
+  *Available*; **Access** changes the choice, **Disable** withdraws it (the folder
+  is deleted from SFTPGo; the files on the drive are untouched) and **Ignore**
+  hides a new drive. Read-write means the user's own SFTPGo permissions apply
+  there, so a read-only user (or the Keycloak read-only role) stays read-only.
+  The page updates by itself when a drive is mounted, unmounted or ejected: an
+  enabled drive that is removed stays listed as *Not mounted* (use **Remove** to
+  forget it) and becomes *Available* again when plugged back in.
+- **How SFTPGo reaches it:** the overlay also bind-mounts the media directory
+  read-write (`rslave`) into the `sftpgo` container at `/srv/drives`, so SFTPGo
+  (uid 1000) must be allowed to write to the drive for read-write access: ext4
+  ownership, or `uid=1000,gid=1000` mount options for FAT/exFAT. SFTPGo changes
+  use the signed-in administrator's token; the gateway stores no SFTPGo
+  credentials, so **unplugging a drive does not revoke it**: SFTPGo just reports
+  errors for the missing directory. Users who sign in with a Keycloak token are
+  rebuilt by the authentication hook at every login, which adds the drives they
+  are entitled to. Do not delete a `mlw-drive-*` folder in the SFTPGo console
+  while it is in use: Keycloak logins that reference it fail until the drive is
+  re-saved on the Access page.
+- **Detection only:** to keep drives out of SFTPGo, remove the `sftpgo` service and
+  `MEDIA_SFTPGO_DIR` from `docker-compose.media.yml`; Enable then only records
+  the decision.
 - **Adding a drive by hand:** for a volume that is mounted below the media
   directory but not detected (a FUSE, exFAT-fuse or network mount, or a drive
   whose sysfs entry is missing), press **Add drive** on the Drives page. The dialog
   asks for a **name** and the **mount point** (absolute host path below the media
   directory, which must be mounted now and must not be a symlink leaving it);
   **device** and **file system** are optional and default to what the kernel
-  reports; *Make available now* decides whether it is enabled at once. A manual
+  reports; *Make available now* decides whether it is enabled at once (choose who may use it afterwards with **Access**). A manual
   drive is marked *manual*, can be disabled and re-enabled, stays listed while
   unmounted, and is deleted with **Remove**.
 - **Remembered:** decisions are stored by filesystem UUID in the `proxy-state`
-  volume (`media.json`). Nothing is written to the drives, and SFTPGo is not
-  involved yet: enabling a drive does not publish its files.
+  volume (`media.json`). The gateway never writes to a drive; SFTPGo does, for
+  users given read-write access.
 - **No desktop pop-up:** the gateway runs in a container, so the question is asked
   on the Drives page, not as a desktop dialog.
 - Used space is shown when the container may read the mount point; udisks mounts

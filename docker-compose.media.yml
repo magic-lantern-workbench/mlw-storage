@@ -34,7 +34,16 @@
 # propagation, so drives the desktop mounts there show up inside the proxy
 # container and in its /proc/self/mountinfo, which the gateway waits on without
 # using CPU. /run/udev (read-only) supplies labels and UUIDs. Nothing is written
-# to the drive, and nothing is made available until an administrator enables it.
+# to the drive by the gateway, and nothing is made available until an
+# administrator enables it.
+#
+# Enabling a drive publishes it: the SFTPGo container also gets the media
+# directory (read-write, rslave) at /srv/drives, and the gateway creates an
+# SFTPGo virtual folder for the drive and attaches it to the users and Keycloak
+# roles the administrator picks, at /drives/<name>. Remove the sftpgo service
+# below and MEDIA_SFTPGO_DIR to keep drives as detection-only. The files on a
+# drive are then accessible to SFTPGo as uid 1000, so the drive must be writable
+# by that user for read-write access.
 #
 # Set MLW_MEDIA_DIR in .env if your desktop mounts drives elsewhere, for example
 # /run/media (Fedora, Arch). The host's / must be a shared mount (the systemd
@@ -47,6 +56,8 @@ services:
       MEDIA_STATE_FILE: /var/lib/mlw-proxy/media.json
       # Testing aid: also report loop and other virtual devices (default: only physical drives).
       MEDIA_INCLUDE_VIRTUAL: ${MLW_MEDIA_INCLUDE_VIRTUAL:-false}
+      # Where SFTPGo sees the media directory (the sftpgo volume below).
+      MEDIA_SFTPGO_DIR: /srv/drives
     volumes:
       - type: bind
         source: ${MLW_MEDIA_DIR:-/media}
@@ -59,6 +70,14 @@ services:
         target: /run/udev
         read_only: true
       - proxy-state:/var/lib/mlw-proxy   # remembered decisions
+
+  sftpgo:
+    volumes:
+      - type: bind
+        source: ${MLW_MEDIA_DIR:-/media}
+        target: /srv/drives
+        bind:
+          propagation: rslave
 
 volumes:
   proxy-state:

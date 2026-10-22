@@ -240,6 +240,14 @@ type hookUser struct {
 	HomeDir     string              `json:"home_dir"`
 	Description string              `json:"description,omitempty"`
 	Permissions map[string][]string `json:"permissions"`
+	// Shared drives for this user. SFTPGo replaces the user's folders with
+	// what the hook returns, so they must be repeated at every login.
+	Folders []driveGrant `json:"virtual_folders,omitempty"`
+}
+
+// driveGranter says which shared drives a user may use (see mediaStore).
+type driveGranter interface {
+	grants(user string, roles []string) []driveGrant
 }
 
 // authHook returns the handler SFTPGo calls to authenticate password logins.
@@ -248,7 +256,7 @@ type hookUser struct {
 // token's sub (Keycloak user id) and the user must hold the required realm
 // role. Everything else is rejected, so while the hook is enabled SFTPGo's
 // local users can only log in with public keys.
-func authHook(v *verifier, st *storage) http.Handler {
+func authHook(v *verifier, st *storage, drives ...driveGranter) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -297,13 +305,22 @@ func authHook(v *verifier, st *storage) http.Handler {
 			return
 		}
 		log.Printf("auth: accept %s login for user %s (%s) from %s, root %s", req.Protocol, claims.Subject, claims.PreferredUsername, req.IP, home)
-		writeJSON(w, http.StatusOK, hookUser{
+		out := hookUser{
 			Status:      1,
 			Username:    claims.Subject,
 			HomeDir:     home,
 			Description: claims.description(),
 			Permissions: map[string][]string{"/": perms},
-		})
+		}
+		for _, d := range drives {
+			for _, g := range d.grants(claims.Subject, claims.RealmAccess.Roles) {
+				out.Folders = append(out.Folders, g)
+				if g.ReadOnly { // otherwise the drive inherits the user's permissions for /
+					out.Permissions[g.VirtualPath] = []string{"list", "download"}
+				}
+			}
+		}
+		writeJSON(w, http.StatusOK, out)
 	})
 }
 

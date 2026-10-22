@@ -72,6 +72,7 @@ type uiSession struct {
 type ui struct {
 	api    string      // SFTPGo base URL, without trailing slash
 	media  *mediaStore // optional: physical drive detection (nil = feature off)
+	roles  bool        // Keycloak login is on, so drives can be shared with realm roles
 	client *http.Client
 	now    func() time.Time
 
@@ -431,6 +432,7 @@ type page struct {
 	Pending                          int    // drives waiting for a decision
 	MediaDir                         string // media directory on the host
 	Drives                           []driveRow
+	Access                           *accessView
 	Pages                            []userPage
 	Total, ActiveCount               int
 	Generated                        string
@@ -482,6 +484,11 @@ nav a.on{color:var(--ink);background:var(--bg);font-weight:600}
 .pill.off,.pill.ign{background:var(--bg);color:var(--muted);border:1px solid var(--line)}
 .note{background:color-mix(in srgb,var(--accent) 12%,transparent);border:1px solid var(--accent);border-radius:8px;padding:10px 12px;margin-bottom:16px}
 .dim{color:var(--muted);font-size:13px}
+.acts a.btn{margin-left:6px;padding:6px 12px;font-size:14px}
+.card h2{font-size:17px;margin:20px 0 6px;color:var(--brand)}
+.card h2:first-child{margin-top:0}
+.checks{max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px 12px;background:var(--bg)}
+.checks .check{margin:8px 0}
 dialog{border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--ink);padding:20px;width:min(480px,calc(100vw - 32px))}
 dialog::backdrop{background:rgba(0,0,0,.45)}
 dialog h2{margin:0 0 4px;font-size:20px;color:var(--brand)}

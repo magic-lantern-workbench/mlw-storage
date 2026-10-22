@@ -135,7 +135,13 @@ COMPOSE_FILE=docker-compose.prod.yml:docker-compose.media.yml
 
 Drive detection bind-mounts the host's media directory read-only into the gateway
 container (needs the host's `/` to have shared mount propagation, the systemd
-default: `findmnt -no PROPAGATION /` prints `shared`).
+default: `findmnt -no PROPAGATION /` prints `shared`). It also bind-mounts the
+directory read-write into the SFTPGo container at `/srv/drives`: when you enable
+a drive on the Drives page you choose the users (and Keycloak roles) who get it,
+and the gateway publishes it to them in SFTPGo as `/drives/<name>`, read-write
+unless you tick *Read-only*. SFTPGo runs as uid 1000, so the drive must be
+writable by that user (for FAT/exFAT, mount with `uid=1000,gid=1000`). Unplugging
+a drive does not revoke it; use **Disable** first.
 
 **TLS.** The gateway serves plain HTTP, so the admin password and session cookie
 are not encrypted. Put a TLS-terminating reverse proxy in front of port 8380 for
