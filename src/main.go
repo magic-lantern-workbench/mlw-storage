@@ -152,7 +152,11 @@ func main() {
 			log.Fatalf("storage: %v", err)
 		}
 		// Users choose their root directory through the public HTTP port.
-		mux.Handle("/mlw/v1/storage/", storageAPI("/mlw/v1/storage/", ver, st))
+		var granters []driveGranter
+		if drives != nil {
+			granters = append(granters, drives)
+		}
+		mux.Handle("/mlw/v1/storage/", storageAPI("/mlw/v1/storage/", ver, st, granters...))
 	}
 
 	srv := &http.Server{

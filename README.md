@@ -232,6 +232,7 @@ to know the user id in advance:
 | `PUT /mlw/v1/storage/root` with `{"path": "projects/a"}` | choose the SFTP root |
 | `GET /mlw/v1/storage/root` | show the current choice and the resulting root |
 | `DELETE /mlw/v1/storage/root` | go back to the private `data/users/<sub>` directory |
+| `GET /mlw/v1/storage/drives` | list the removable drives the user may use now (enabled for the user or one of the token's roles, and mounted): `{"drives": [{"name", "path": "/drives/<name>", "read_only"}]}`; empty when drive publishing is off |
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" -X PUT \
