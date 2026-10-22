@@ -26,6 +26,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -384,5 +385,140 @@ func TestWatchStopsOnCancel(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("watch did not stop on cancel")
+	}
+}
+
+// newManualMedia returns a store whose media directory really exists, with an
+// NFS share and a FUSE volume mounted in it (neither is detected on its own).
+func newManualMedia(t *testing.T) (*mediaStore, string) {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "media")
+	for _, d := range []string{"msm/share", "msm/plain"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("/tmp", filepath.Join(dir, "msm/escape")); err != nil {
+		t.Fatal(err)
+	}
+	mi := filepath.Join(root, "mountinfo")
+	info := "304 28 0:55 / " + dir + "/msm/share rw,relatime - nfs4 server:/export rw\n" +
+		"305 28 0:56 / " + dir + "/msm/escape rw,relatime - fuseblk /dev/sdc1 rw\n"
+	if err := os.WriteFile(mi, []byte(info), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := newMediaStore(mediaConfig{Dir: dir, HostDir: "/media", MountInfo: mi, Sys: filepath.Join(root, "sys"),
+		Udev: filepath.Join(root, "udev"), StateFile: filepath.Join(root, "media.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.statfs = func(string, *syscall.Statfs_t) error { return syscall.EACCES }
+	return s, root
+}
+
+func TestAddManualDrive(t *testing.T) {
+	s, _ := newManualMedia(t)
+	s.rescan()
+	if len(s.snapshot()) != 0 || s.pending() != 0 {
+		t.Fatal("an undetected mount should not be listed")
+	}
+	if err := s.addManual(" Office share ", "/media/msm/share/", "", "", true, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	snap := s.snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+	d := snap[0]
+	if d.Name != "Office share" || d.Key != "mp:/media/msm/share" || d.MountPoint != "/media/msm/share" || d.Device != "server:/export" ||
+		d.FSType != "nfs4" || !d.Manual || !d.Mounted || d.State != driveAvailable || d.Admin != "admin" {
+		t.Errorf("drive = %+v", d)
+	}
+	if s.pending() != 0 {
+		t.Error("a manual drive should not be pending")
+	}
+
+	// remembered across a restart, still manual
+	s2, err := newMediaStore(s.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2.rescan()
+	if got := s2.snapshot(); len(got) != 1 || !got[0].Manual || !got[0].Mounted {
+		t.Errorf("after restart: %+v", got)
+	}
+
+	// disable and re-enable while mounted keeps the manual flag
+	if err := s.decide(d.Key, driveIgnored, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.snapshot(); len(got) != 1 || got[0].State != driveIgnored || !got[0].Manual {
+		t.Errorf("after disable: %+v", got)
+	}
+	if err := s.decide(d.Key, driveAvailable, "admin"); err != nil {
+		t.Fatal(err)
+	}
+
+	// unmounted: stays listed; can be switched; removing makes it disappear
+	if err := os.WriteFile(s.cfg.MountInfo, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.rescan()
+	if got := s.snapshot(); len(got) != 1 || got[0].Mounted || got[0].State != driveAvailable {
+		t.Errorf("unmounted: %+v", got)
+	}
+	if err := s.decide(d.Key, driveIgnored, "admin"); err != nil {
+		t.Errorf("disable unmounted manual drive: %v", err)
+	}
+	if got := s.snapshot(); len(got) != 1 || got[0].State != driveIgnored {
+		t.Errorf("unmounted, disabled: %+v", got)
+	}
+	if err := s.forget(d.Key, "admin"); err != nil || len(s.snapshot()) != 0 {
+		t.Errorf("forget: %v %+v", err, s.snapshot())
+	}
+}
+
+func TestAddManualDriveRejectsBadInput(t *testing.T) {
+	s, _ := newManualMedia(t)
+	cases := []struct{ name, path, dev, fs, want string }{
+		{"", "/media/msm/share", "", "", "name"},
+		{"x", "/etc", "", "", "below /media"},
+		{"x", "/media/../etc", "", "", "below /media"},
+		{"x", "/media", "", "", "below /media"},
+		{"x", "/media/msm/missing", "", "", "does not exist"},
+		{"x", "/media/msm/plain", "", "", "Nothing is mounted"},
+		{"x", "/media/msm/escape", "", "", "outside"},
+		{"x", "/media/msm/share", "sdb1", "", "/dev"},
+		{"x", "/media/msm/share", "/dev/../etc", "", "/dev"},
+		{"x", "/media/msm/share", "", "ext4; rm", "file system"},
+		{strings.Repeat("n", 65), "/media/msm/share", "", "", "name"},
+	}
+	for _, c := range cases {
+		err := s.addManual(c.name, c.path, c.dev, c.fs, true, "admin")
+		var bad inputError
+		if !errors.As(err, &bad) || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%+v: err = %v, want input error containing %q", c, err, c.want)
+		}
+	}
+	if len(s.snapshot()) != 0 {
+		t.Error("a rejected entry was stored")
+	}
+	if err := s.addManual("a", "/media/msm/share", "/dev/sdz9", "ext4", false, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.snapshot()[0]; got.Device != "/dev/sdz9" || got.FSType != "ext4" || got.State != driveIgnored {
+		t.Errorf("overrides: %+v", got)
+	}
+	if err := s.addManual("b", "/media/msm/share", "", "", true, "admin"); err == nil || !strings.Contains(err.Error(), "already configured") {
+		t.Errorf("duplicate: %v", err)
+	}
+}
+
+func TestAddManualRefusesDetectedDrive(t *testing.T) {
+	s, _ := newManualMedia(t)
+	s.mounted = map[string]*Drive{"uuid:X": {Key: "uuid:X", MountPoint: "/media/msm/share"}}
+	if err := s.addManual("a", "/media/msm/share", "", "", true, "admin"); err == nil || !strings.Contains(err.Error(), "detected automatically") {
+		t.Errorf("err = %v", err)
 	}
 }

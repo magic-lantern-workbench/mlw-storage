@@ -243,3 +243,53 @@ func TestHumanBytes(t *testing.T) {
 		}
 	}
 }
+
+func TestAddDriveDialogAndEndpoint(t *testing.T) {
+	u, h := newUIServer(t, nil)
+	ms, _ := newManualMedia(t)
+	ms.rescan()
+	u.media = ms
+	mux := http.NewServeMux()
+	u.register(mux)
+	c := login(t, mux)
+
+	page := get(mux, "/mlw/drives", c).Body.String()
+	for _, want := range []string{`data-open="add-drive"`, `<dialog id="add-drive"`, `action="/mlw/drives/add"`, `name="name"`, `name="path"`,
+		`name="device"`, `name="fstype"`, `name="enable"`, `value="/media/"`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("drives page missing %q", want)
+		}
+	}
+	_ = h
+	form := url.Values{"name": {"Office share"}, "path": {"/media/msm/share"}, "enable": {"1"}}
+	if rec := post(mux, "/mlw/drives/add", form, c, "http://evil.example"); rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin add: %d", rec.Code)
+	}
+	if rec := post(mux, "/mlw/drives/add", form, nil, sameHost); rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/mlw/login" {
+		t.Fatalf("add without session: %d", rec.Code)
+	}
+	bad := post(mux, "/mlw/drives/add", url.Values{"name": {"x"}, "path": {"/etc"}}, c, sameHost)
+	if bad.Code != http.StatusUnprocessableEntity || !strings.Contains(bad.Body.String(), "below /media") {
+		t.Errorf("bad path: %d %q", bad.Code, bad.Body.String())
+	}
+	rec := post(mux, "/mlw/drives/add", form, c, sameHost)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/mlw/drives" {
+		t.Fatalf("add: %d", rec.Code)
+	}
+	table := get(mux, "/mlw/drives/table", c).Body.String()
+	for _, want := range []string{"Office share", "server:/export", "nfs4 · manual", "/media/msm/share", `pill ok">Available<`,
+		`action="/mlw/drives/ignore"`, `action="/mlw/drives/forget"`} {
+		if !strings.Contains(table, want) {
+			t.Errorf("table missing %q: %s", want, table)
+		}
+	}
+	// disable keeps the row (as Disabled), then remove deletes it
+	post(mux, "/mlw/drives/ignore", url.Values{"key": {"mp:/media/msm/share"}}, c, sameHost)
+	if table := get(mux, "/mlw/drives/table", c).Body.String(); !strings.Contains(table, ">Disabled<") {
+		t.Errorf("disabled manual drive missing: %s", table)
+	}
+	post(mux, "/mlw/drives/forget", url.Values{"key": {"mp:/media/msm/share"}}, c, sameHost)
+	if table := get(mux, "/mlw/drives/table", c).Body.String(); strings.Contains(table, "Office share") {
+		t.Error("removed drive still listed")
+	}
+}

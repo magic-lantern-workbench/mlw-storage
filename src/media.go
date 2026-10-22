@@ -50,6 +50,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -57,6 +58,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 type mediaConfig struct {
@@ -108,6 +110,7 @@ type Drive struct {
 	Used, Free uint64
 	HasUsage   bool
 	Mounted    bool
+	Manual     bool // added by an administrator rather than detected
 	State      string
 	Admin      string // who decided
 	Decided    time.Time
@@ -123,6 +126,7 @@ type known struct {
 	Bus        string    `json:"bus"`
 	Model      string    `json:"model"`
 	Size       uint64    `json:"size"`
+	Manual     bool      `json:"manual,omitempty"`
 	Admin      string    `json:"admin"`
 	Decided    time.Time `json:"decided"`
 }
@@ -346,11 +350,17 @@ func (s *mediaStore) hostPath(containerPath string) string {
 func (s *mediaStore) scan(data []byte) map[string]*Drive {
 	out := map[string]*Drive{}
 	for _, m := range parseMountInfo(data) {
-		if !strings.HasPrefix(m.MountPoint, s.cfg.Dir+"/") || !strings.HasPrefix(m.Source, "/dev/") {
+		if !strings.HasPrefix(m.MountPoint, s.cfg.Dir+"/") {
 			continue
 		}
-		d, ok := s.describe(m)
-		if !ok {
+		var d *Drive
+		if strings.HasPrefix(m.Source, "/dev/") {
+			d, _ = s.describe(m)
+		}
+		if d == nil {
+			d = s.manualDrive(m)
+		}
+		if d == nil {
 			continue
 		}
 		if _, dup := out[d.Key]; dup { // the same volume mounted twice
@@ -436,9 +446,20 @@ func (s *mediaStore) decide(key, state, admin string) error {
 	defer s.mu.Unlock()
 	d, ok := s.mounted[key]
 	if !ok {
-		return errNoSuchDrive
+		kn, manual := s.known[key]
+		if !manual || !kn.Manual { // a manual drive can be switched while unmounted
+			return errNoSuchDrive
+		}
+		kn.State, kn.Admin, kn.Decided = state, admin, s.now().UTC()
+		s.known[key] = kn
+		if err := s.save(); err != nil {
+			return err
+		}
+		log.Printf("media: %q marked %s by %q", kn.Name, state, admin)
+		s.notifyLocked()
+		return nil
 	}
-	s.known[key] = known{State: state, Name: d.Name, Device: d.Device, MountPoint: d.MountPoint, FSType: d.FSType,
+	s.known[key] = known{State: state, Manual: s.known[key].Manual, Name: d.Name, Device: d.Device, MountPoint: d.MountPoint, FSType: d.FSType,
 		Bus: d.Bus, Model: d.Model, Size: d.Size, Admin: admin, Decided: s.now().UTC()}
 	if err := s.save(); err != nil {
 		return err
@@ -451,16 +472,134 @@ func (s *mediaStore) decide(key, state, admin string) error {
 // forget removes a remembered decision (and the row of a drive that is gone).
 func (s *mediaStore) forget(key, admin string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.known[key]; !ok {
+	kn, ok := s.known[key]
+	if !ok {
+		s.mu.Unlock()
 		return errNoSuchDrive
 	}
 	delete(s.known, key)
-	if err := s.save(); err != nil {
+	err := s.save()
+	if err == nil {
+		log.Printf("media: forgot %q by %q", key, admin)
+		s.notifyLocked()
+	}
+	s.mu.Unlock()
+	if err == nil && kn.Manual {
+		s.rescan() // the drive was only mounted as far as the manual entry went
+	}
+	return err
+}
+
+// inputError is a problem with what the administrator typed, safe to show.
+type inputError string
+
+func (e inputError) Error() string { return string(e) }
+
+var (
+	fsTypeRE = regexp.MustCompile(`^[A-Za-z0-9._+-]{1,24}$`)
+	devRE    = regexp.MustCompile(`^/dev/[A-Za-z0-9._/-]{1,60}$`)
+)
+
+// manualDrive describes a mount that detection does not report, for example a
+// FUSE or exFAT volume, if an administrator added it by hand.
+func (s *mediaStore) manualDrive(m mountEntry) *Drive {
+	key := "mp:" + s.hostPath(m.MountPoint)
+	s.mu.Lock()
+	kn, ok := s.known[key]
+	s.mu.Unlock()
+	if !ok || !kn.Manual {
+		return nil
+	}
+	d := &Drive{Key: key, Name: kn.Name, Device: kn.Device, FSType: kn.FSType, Bus: kn.Bus, Model: kn.Model,
+		MountPoint: s.hostPath(m.MountPoint), Mounted: true, Manual: true}
+	if d.Device == "" {
+		d.Device = m.Source
+	}
+	if d.FSType == "" {
+		d.FSType = m.FSType
+	}
+	return d
+}
+
+// rescan reads the mount table now, so a change made through the UI shows at once.
+func (s *mediaStore) rescan() {
+	if b, err := os.ReadFile(s.cfg.MountInfo); err == nil {
+		s.scans.Add(1)
+		s.update(s.scan(b))
+	}
+}
+
+// addManual records a volume that is mounted below the media directory but that
+// detection did not offer. hostPath is the mount point on the host. Device and
+// fsType are optional and default to what the kernel reports for the mount.
+func (s *mediaStore) addManual(name, hostPath, device, fsType string, enable bool, admin string) error {
+	name = strings.TrimSpace(name)
+	switch {
+	case name == "" || len(name) > 64 || strings.ContainsFunc(name, unicode.IsControl):
+		return inputError("Enter a name of up to 64 characters.")
+	case device != "" && (!devRE.MatchString(device) || strings.Contains(device, "..")):
+		return inputError("The device must be a path below /dev, such as /dev/sdb1.")
+	case fsType != "" && !fsTypeRE.MatchString(fsType):
+		return inputError("The file system type may contain only letters, digits and . _ + -")
+	}
+	hostPath = filepath.Clean(strings.TrimSpace(hostPath))
+	if !strings.HasPrefix(hostPath, s.cfg.HostDir+"/") {
+		return inputError("The mount point must be a directory below " + s.cfg.HostDir + ".")
+	}
+	cpath := s.cfg.Dir + strings.TrimPrefix(hostPath, s.cfg.HostDir)
+	if real, err := filepath.EvalSymlinks(cpath); err != nil {
+		return inputError("That directory does not exist.")
+	} else if real != cpath && !strings.HasPrefix(real, s.cfg.Dir+"/") {
+		return inputError("The mount point must not lead outside " + s.cfg.HostDir + ".")
+	}
+	data, err := os.ReadFile(s.cfg.MountInfo)
+	if err != nil {
 		return err
 	}
-	log.Printf("media: forgot %q by %q", key, admin)
+	var m *mountEntry
+	for _, e := range parseMountInfo(data) {
+		if e.MountPoint == cpath {
+			e := e
+			m = &e // the last mount on a path is the visible one
+		}
+	}
+	if m == nil {
+		return inputError("Nothing is mounted at that path. Mount the drive first.")
+	}
+	if device == "" {
+		device = m.Source
+	}
+	if fsType == "" {
+		fsType = m.FSType
+	}
+	key := "mp:" + hostPath
+
+	s.mu.Lock()
+	if _, dup := s.known[key]; dup {
+		s.mu.Unlock()
+		return inputError("That mount point is already configured.")
+	}
+	for _, d := range s.mounted {
+		if d.MountPoint == hostPath {
+			s.mu.Unlock()
+			return inputError("That drive was detected automatically. Enable it in the list.")
+		}
+	}
+	state := driveIgnored
+	if enable {
+		state = driveAvailable
+	}
+	s.known[key] = known{State: state, Manual: true, Name: name, Device: device, MountPoint: hostPath, FSType: fsType,
+		Admin: admin, Decided: s.now().UTC()}
+	if err := s.save(); err != nil {
+		delete(s.known, key)
+		s.mu.Unlock()
+		return err
+	}
+	log.Printf("media: %q added manually at %s by %q", name, hostPath, admin)
 	s.notifyLocked()
+	s.mu.Unlock()
+	s.rescan()
 	return nil
 }
 
@@ -473,15 +612,15 @@ func (s *mediaStore) snapshot() []Drive {
 		c := *d
 		c.State = driveNew
 		if kn, ok := s.known[k]; ok {
-			c.State, c.Admin, c.Decided = kn.State, kn.Admin, kn.Decided
+			c.State, c.Admin, c.Decided, c.Manual = kn.State, kn.Admin, kn.Decided, kn.Manual
 		}
 		out = append(out, c)
 	}
 	for k, kn := range s.known {
-		if _, here := s.mounted[k]; here || kn.State != driveAvailable {
+		if _, here := s.mounted[k]; here || (kn.State != driveAvailable && !kn.Manual) {
 			continue
 		}
-		out = append(out, Drive{Key: k, Name: kn.Name, Device: kn.Device, MountPoint: kn.MountPoint, FSType: kn.FSType,
+		out = append(out, Drive{Key: k, Manual: kn.Manual, Name: kn.Name, Device: kn.Device, MountPoint: kn.MountPoint, FSType: kn.FSType,
 			Bus: kn.Bus, Model: kn.Model, Size: kn.Size, State: kn.State, Admin: kn.Admin, Decided: kn.Decided})
 	}
 	s.mu.Unlock()

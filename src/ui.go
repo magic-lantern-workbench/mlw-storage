@@ -429,6 +429,7 @@ type page struct {
 	Nav                              string // current page in the top bar
 	HasMedia                         bool   // show the Drives page
 	Pending                          int    // drives waiting for a decision
+	MediaDir                         string // media directory on the host
 	Drives                           []driveRow
 	Pages                            []userPage
 	Total, ActiveCount               int
@@ -481,6 +482,13 @@ nav a.on{color:var(--ink);background:var(--bg);font-weight:600}
 .pill.off,.pill.ign{background:var(--bg);color:var(--muted);border:1px solid var(--line)}
 .note{background:color-mix(in srgb,var(--accent) 12%,transparent);border:1px solid var(--accent);border-radius:8px;padding:10px 12px;margin-bottom:16px}
 .dim{color:var(--muted);font-size:13px}
+dialog{border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--ink);padding:20px;width:min(480px,calc(100vw - 32px))}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+dialog h2{margin:0 0 4px;font-size:20px;color:var(--brand)}
+dialog .err{margin:12px 0 0}
+dialog .err[hidden]{display:none}
+.check{display:flex;gap:8px;align-items:center;color:var(--ink)}
+input[type=checkbox]{width:auto}
 .acts{white-space:nowrap;text-align:right}
 .acts form{display:inline;margin:0 0 0 6px}
 .acts .btn{padding:6px 12px;font-size:14px}
@@ -543,6 +551,13 @@ const menuJS = `function badge(n){var b=document.getElementById("pending");if(b)
 	`function show(k){i=k;for(var j=0;j<t.length;j++)t[j].hidden=j!==i;l.textContent=t[i].getAttribute("data-label");p.disabled=i===0;n.disabled=i===t.length-1}` +
 	`p.addEventListener("click",function(){if(i>0)show(i-1)});n.addEventListener("click",function(){if(i<t.length-1)show(i+1)});` +
 	`document.documentElement.className+=" js";show(0)});` +
+	`document.addEventListener("click",function(e){var t=e.target.closest?e.target.closest("[data-open],[data-close]"):null;if(!t)return;` +
+	`if(t.hasAttribute("data-open")){var d=document.getElementById(t.getAttribute("data-open"));if(d&&d.showModal)d.showModal()}else t.closest("dialog").close()});` +
+	`document.addEventListener("submit",function(e){var f=e.target;if(!f.classList||!f.classList.contains("addform"))return;e.preventDefault();` +
+	`var b=f.querySelector("button[type=submit]"),m=f.querySelector(".err");b.disabled=true;m.hidden=true;` +
+	`fetch(f.action,{method:"POST",body:new URLSearchParams(new FormData(f)),headers:{"X-Mlw-Fetch":"1"},credentials:"same-origin"})` +
+	`.then(function(r){if(r.ok){f.reset();f.closest("dialog").close();return}return r.text().then(function(t){m.textContent=t;m.hidden=false})})` +
+	`.catch(function(){m.textContent="The request failed.";m.hidden=false}).then(function(){b.disabled=false})});` +
 	`document.addEventListener("click",function(e){var m=document.querySelector(".menu[open]");if(m&&!m.contains(e.target))m.removeAttribute("open")});` +
 	`document.addEventListener("keydown",function(e){if(e.key==="Escape"){var m=document.querySelector(".menu[open]");if(m){m.removeAttribute("open");m.querySelector("summary").focus()}}});`
 

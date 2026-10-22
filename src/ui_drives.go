@@ -30,6 +30,7 @@ package main
 // gateway wakes whenever a drive is mounted, unmounted or decided on.
 
 import (
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
@@ -42,6 +43,7 @@ import (
 type driveRow struct {
 	Name, Device, MountPoint, Type, Capacity string
 	Status, Class                            string
+	Manual                                   bool
 	Actions                                  []driveAction
 }
 
@@ -64,13 +66,16 @@ func humanBytes(n uint64) string {
 }
 
 func rowFor(d Drive) driveRow {
-	r := driveRow{Name: d.Name, Device: d.Device, MountPoint: d.MountPoint}
+	r := driveRow{Name: d.Name, Device: d.Device, MountPoint: d.MountPoint, Manual: d.Manual}
 	r.Type = d.FSType
 	if d.Bus != "" {
 		r.Type = strings.TrimPrefix(r.Type+" · "+d.Bus, " · ")
 	}
 	if d.Removable {
 		r.Type += " · removable"
+	}
+	if d.Manual {
+		r.Type = strings.TrimPrefix(r.Type+" · manual", " · ")
 	}
 	switch {
 	case d.HasUsage:
@@ -95,6 +100,12 @@ func rowFor(d Drive) driveRow {
 		r.Status, r.Class = "New: not enabled", "new"
 		r.Actions = []driveAction{act("enable", "Enable", true), act("ignore", "Ignore", false)}
 	}
+	if d.Manual && d.Mounted { // a manual entry can always be removed
+		r.Actions = append(r.Actions, act("forget", "Remove", false))
+	}
+	if d.Manual && d.State == driveIgnored {
+		r.Status = "Disabled"
+	}
 	return r
 }
 
@@ -103,6 +114,7 @@ func (u *ui) withNav(p page, nav string) page {
 	if u.media != nil {
 		p.HasMedia = true
 		p.Pending = u.media.pending()
+		p.MediaDir = u.media.cfg.HostDir
 	}
 	return p
 }
@@ -117,7 +129,7 @@ func (u *ui) registerDrives(mux *http.ServeMux) {
 func (u *ui) drivesData(s *uiSession) page {
 	var rows []driveRow
 	for _, d := range u.media.snapshot() {
-		if d.State == driveIgnored && !d.Mounted {
+		if d.State == driveIgnored && !d.Mounted && !d.Manual {
 			continue
 		}
 		rows = append(rows, rowFor(d))
@@ -210,11 +222,18 @@ func (u *ui) driveAction(w http.ResponseWriter, r *http.Request) {
 		err = u.media.decide(key, driveIgnored, s.admin)
 	case "forget":
 		err = u.media.forget(key, s.admin)
+	case "add":
+		err = u.media.addManual(r.PostForm.Get("name"), r.PostForm.Get("path"), strings.TrimSpace(r.PostForm.Get("device")),
+			strings.TrimSpace(r.PostForm.Get("fstype")), r.PostForm.Get("enable") != "", s.admin)
 	default:
 		http.NotFound(w, r)
 		return
 	}
+	var bad inputError
 	switch {
+	case errors.As(err, &bad):
+		http.Error(w, bad.Error(), http.StatusUnprocessableEntity)
+		return
 	case err == errNoSuchDrive:
 		http.Error(w, "That drive is no longer mounted.", http.StatusConflict)
 		return
@@ -231,9 +250,22 @@ func (u *ui) driveAction(w http.ResponseWriter, r *http.Request) {
 }
 
 var drivesTmpl = func() *template.Template {
-	t := mustPage("mlw-storage: Drives", uiBar+`<main><h1>Drives</h1>
-<p class="sub">Physical storage volumes mounted on this machine. A drive is made available to mlw-storage only after you enable it.</p>
-<div id="drives">{{template "drives" .}}</div></main>`)
+	t := mustPage("mlw-storage: Drives", uiBar+`<main><div class="head"><div><h1>Drives</h1>
+<p class="sub">Physical storage volumes mounted on this machine. A drive is made available to mlw-storage only after you enable it.</p></div>
+<button type="button" class="btn" data-open="add-drive">Add drive</button></div>
+<div id="drives">{{template "drives" .}}</div>
+<dialog id="add-drive" aria-labelledby="add-title"><form class="addform" method="post" action="/mlw/drives/add">
+<h2 id="add-title">Add a drive manually</h2>
+<p class="dim">For a drive that is mounted below <b>{{.MediaDir}}</b> but was not detected, such as a FUSE or network volume.</p>
+<div class="err" role="alert" hidden></div>
+<label for="ad-name">Name</label><input id="ad-name" name="name" maxlength="64" required placeholder="Backup disk">
+<label for="ad-path">Mount point</label><input id="ad-path" name="path" required placeholder="{{.MediaDir}}/…" value="{{.MediaDir}}/">
+<div class="dim">Absolute path on the host. It must be a mounted volume.</div>
+<label for="ad-dev">Device <span class="dim">(optional)</span></label><input id="ad-dev" name="device" maxlength="64" placeholder="/dev/sdb1">
+<label for="ad-fs">File system <span class="dim">(optional)</span></label><input id="ad-fs" name="fstype" maxlength="24" placeholder="ext4">
+<label class="check"><input type="checkbox" name="enable" value="1" checked>Make available to mlw-storage now</label>
+<div class="actions"><button type="submit" class="btn">Add drive</button><button type="button" class="btn ghost" data-close>Cancel</button></div>
+</form></dialog></main>`)
 	template.Must(t.New("drives").Parse(`{{if .Pending}}<div class="note" role="status"><b>{{.Pending}}</b> new drive{{if ne .Pending 1}}s{{end}} detected. Enable a drive to make it available to mlw-storage.</div>{{end}}
 <div class="card wrap"><table><thead><tr><th>Drive</th><th>Mount point</th><th>Type</th><th>Capacity</th><th>Status</th><th></th></tr></thead><tbody>
 {{range .Drives}}<tr><td><b>{{.Name}}</b><div class="dim">{{.Device}}</div></td><td>{{.MountPoint}}</td><td>{{.Type}}</td><td>{{.Capacity}}</td><td><span class="pill {{.Class}}">{{.Status}}</span></td><td class="acts">{{range .Actions}}<form class="act" method="post" action="/mlw/drives/{{.Path}}"><input type="hidden" name="key" value="{{.Key}}"><button type="submit" class="btn{{if not .Primary}} ghost{{end}}">{{.Label}}</button></form>{{end}}</td></tr>

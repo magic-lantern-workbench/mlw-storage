@@ -126,6 +126,15 @@ COMPOSE_FILE=docker-compose.yml:docker-compose.media.yml
   mounted, unmounted or ejected: an enabled drive that is removed stays listed as
   *Not mounted* (use **Remove** to forget it) and becomes *Available* again when
   plugged back in.
+- **Adding a drive by hand:** for a volume that is mounted below the media
+  directory but not detected (a FUSE, exFAT-fuse or network mount, or a drive
+  whose sysfs entry is missing), press **Add drive** on the Drives page. The dialog
+  asks for a **name** and the **mount point** (absolute host path below the media
+  directory, which must be mounted now and must not be a symlink leaving it);
+  **device** and **file system** are optional and default to what the kernel
+  reports; *Make available now* decides whether it is enabled at once. A manual
+  drive is marked *manual*, can be disabled and re-enabled, stays listed while
+  unmounted, and is deleted with **Remove**.
 - **Remembered:** decisions are stored by filesystem UUID in the `proxy-state`
   volume (`media.json`). Nothing is written to the drives, and SFTPGo is not
   involved yet: enabling a drive does not publish its files.
