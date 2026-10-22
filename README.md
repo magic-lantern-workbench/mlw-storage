@@ -26,8 +26,10 @@ Requires Docker with Compose.
    docker compose up -d
    ```
 
-3. Open the web admin at http://localhost:8380 (via the proxy gateway) and log in as `admin`
-   (or the value of `SFTPGO_ADMIN_USER`) with your password.
+3. Open http://localhost:8380 (via the proxy gateway). It shows the mlw-storage
+   sign-in page (see [Web UI](#web-ui)); sign in as `admin` (or the value of
+   `SFTPGO_ADMIN_USER`) with your password. The SFTPGo web admin is at
+   http://localhost:8380/web/admin/ and has its own sign-in.
 
 SFTPGo's own ports are not published on the host; reach it through the proxy
 gateway (see below): web admin on 8380, SFTP on 2222.
@@ -70,6 +72,100 @@ Configuration (environment variables on the `proxy` service):
 | `PROXY_SFTP_LISTEN` | `:2222`               | SFTP listen address        |
 | `UPSTREAM_HTTP`     | `http://sftpgo:8080`  | SFTPGo web/API endpoint    |
 | `UPSTREAM_SFTP`     | `sftpgo:2022`         | SFTPGo SFTP endpoint       |
+| `PROXY_UI`          | `true`                | `false` disables the mlw-storage web UI |
+
+### Web UI
+
+The gateway serves a small mlw-storage web UI on the HTTP port, and `/`
+redirects to it:
+
+| Page | URL | Purpose |
+|------|-----|---------|
+| Sign in | `/mlw/login` | mlw-storage login; use the SFTPGo administrator credentials |
+| Dashboard | `/mlw/dashboard` | the home page after sign-in: a table of the SFTPGo users (Username, Status, Last login, Description), 20 users per table with left and right arrows and a range label (`1..20`, `21..40`, ...) to move between tables, and, in the user-icon menu (before Logout), **SFTPGo**, which opens SFTPGo's own admin console (`/web/admin/users`) already signed in. |
+
+The gateway checks the credentials against SFTPGo's REST API and keeps the
+resulting API token on the server, behind an HttpOnly, SameSite=Strict session
+cookie; the session ends when the SFTPGo token expires (20 minutes by default) or
+on sign-out, and is lost when the gateway restarts. After 10 failed sign-ins
+from one address within 5 minutes, further attempts are refused for a while.
+The gateway serves plain HTTP; put TLS in front of it in production so the
+password and cookie are encrypted. Set `PROXY_UI=false` on the `proxy` service
+to turn the UI off, in which case `/` goes to SFTPGo as before.
+
+### Optional: drive detection
+
+While mlw-storage runs it can notice physical drives (USB sticks, external or
+extra internal disks) that are mounted on the host, and offer them on a **Drives**
+page of the web UI, next to the Dashboard. It is **disabled by default**; enable
+it by adding the overlay file to `COMPOSE_FILE` in `.env`, then
+`docker compose up -d --build`:
+
+```bash
+COMPOSE_FILE=docker-compose.yml:docker-compose.media.yml
+# production:  docker-compose.prod.yml:docker-compose.media.yml
+# with Keycloak login, add :docker-compose.keycloak.yml
+# MLW_MEDIA_DIR=/run/media     # where your desktop mounts drives (default /media)
+```
+
+- **Detection:** the host's media directory (`/media`) is bind-mounted read-only
+  into the gateway container with `rslave` propagation, so drives the desktop
+  mounts there appear in the container's `/proc/self/mountinfo`. The gateway
+  sleeps in `epoll_wait` on that file (the kernel signals `POLLPRI|POLLERR` when
+  the mount table changes), so it uses no CPU until a drive is mounted or
+  unmounted. `/run/udev` and `/sys` (read-only) supply the label, UUID, model and
+  bus. The host's `/` must be a shared mount (`findmnt -no PROPAGATION /` prints
+  `shared` on systemd systems).
+- **Only physical volumes:** loop, RAM, zram and other virtual devices, network
+  shares and mounts outside the media directory are ignored. An unlocked
+  encrypted volume (device-mapper) counts when it sits on a physical disk.
+- **Enabling and publishing:** a new drive appears on the Drives page as *New:
+  not enabled* and as a red count on the **Drives** link. **Enable** opens the
+  Access page, where you choose the **users** (and, with Keycloak login on, the
+  **Keycloak realm roles**) who get the drive, and whether it is **read-only**
+  (default: read-write). On save the gateway creates an SFTPGo virtual folder
+  `mlw-drive-<name>` for the drive and attaches it to those users at
+  `/drives/<name>`; role members get it when they sign in. The drive is then
+  *Available*; **Access** changes the choice, **Disable** withdraws it (the folder
+  is deleted from SFTPGo; the files on the drive are untouched) and **Ignore**
+  hides a new drive. Read-write means the user's own SFTPGo permissions apply
+  there, so a read-only user (or the Keycloak read-only role) stays read-only.
+  The page updates by itself when a drive is mounted, unmounted or ejected: an
+  enabled drive that is removed stays listed as *Not mounted* (use **Remove** to
+  forget it) and becomes *Available* again when plugged back in.
+- **How SFTPGo reaches it:** the overlay also bind-mounts the media directory
+  read-write (`rslave`) into the `sftpgo` container at `/srv/drives`, so SFTPGo
+  (uid 1000) must be allowed to write to the drive for read-write access: ext4
+  ownership, or `uid=1000,gid=1000` mount options for FAT/exFAT. SFTPGo changes
+  use the signed-in administrator's token; the gateway stores no SFTPGo
+  credentials, so **unplugging a drive does not revoke it**: SFTPGo just reports
+  errors for the missing directory. Users who sign in with a Keycloak token are
+  rebuilt by the authentication hook at every login, which adds the drives they
+  are entitled to. Do not delete a `mlw-drive-*` folder in the SFTPGo console
+  while it is in use: Keycloak logins that reference it fail until the drive is
+  re-saved on the Access page.
+- **Detection only:** to keep drives out of SFTPGo, remove the `sftpgo` service and
+  `MEDIA_SFTPGO_DIR` from `docker-compose.media.yml`; Enable then only records
+  the decision.
+- **Adding a drive by hand:** for a volume that is mounted below the media
+  directory but not detected (a FUSE, exFAT-fuse or network mount, or a drive
+  whose sysfs entry is missing), press **Add drive** on the Drives page. The dialog
+  asks for a **name** and the **mount point** (absolute host path below the media
+  directory, which must be mounted now and must not be a symlink leaving it);
+  **device** and **file system** are optional and default to what the kernel
+  reports; *Make available now* decides whether it is enabled at once (choose who may use it afterwards with **Access**). A manual
+  drive is marked *manual*, can be disabled and re-enabled, stays listed while
+  unmounted, and is deleted with **Remove**.
+- **Remembered:** decisions are stored by filesystem UUID in the `proxy-state`
+  volume (`media.json`). The gateway never writes to a drive; SFTPGo does, for
+  users given read-write access.
+- **No desktop pop-up:** the gateway runs in a container, so the question is asked
+  on the Drives page, not as a desktop dialog.
+- Used space is shown when the container may read the mount point; udisks mounts
+  are often readable only by the logged-in user, in which case only the device size
+  is shown.
+- `MLW_MEDIA_INCLUDE_VIRTUAL=true` also reports loop devices, which is useful for
+  trying the feature without a physical drive (for example `udisksctl loop-setup`).
 
 ### Optional: FTP and WebDAV
 
@@ -136,6 +232,7 @@ to know the user id in advance:
 | `PUT /mlw/v1/storage/root` with `{"path": "projects/a"}` | choose the SFTP root |
 | `GET /mlw/v1/storage/root` | show the current choice and the resulting root |
 | `DELETE /mlw/v1/storage/root` | go back to the private `data/users/<sub>` directory |
+| `GET /mlw/v1/storage/drives` | list the removable drives the user may use now (enabled for the user or one of the token's roles, and mounted): `{"drives": [{"name", "path": "/drives/<name>", "read_only"}]}`; empty when drive publishing is off |
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" -X PUT \

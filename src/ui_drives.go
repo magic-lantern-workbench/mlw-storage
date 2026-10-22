@@ -1,0 +1,328 @@
+// COPYRIGHT_BEGIN
+// MIT License
+//
+// Copyright (c) 2026 Wizzer Works
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+// COPYRIGHT_END
+
+package main
+
+// The Drives page of the web UI: physical storage volumes mounted while
+// mlw-storage runs, each waiting for an administrator to enable it. The page
+// updates by itself: the browser holds a Server-Sent Events connection that the
+// gateway wakes whenever a drive is mounted, unmounted or decided on.
+
+import (
+	"errors"
+	"fmt"
+	"html/template"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// driveRow is a Drive prepared for display.
+type driveRow struct {
+	Name, Device, MountPoint, Type, Capacity string
+	Status, Class                            string
+	Manual                                   bool
+	Access                                   string // who can use it, for an enabled drive
+	Actions                                  []driveAction
+}
+
+type driveAction struct {
+	Path, Key, Label string
+	Primary          bool
+	Link             bool // a link to the Access page instead of a button
+}
+
+func humanBytes(n uint64) string {
+	const unit = 1000
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := uint64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "kMGTPE"[exp])
+}
+
+func rowFor(d Drive, publish bool) driveRow {
+	r := driveRow{Name: d.Name, Device: d.Device, MountPoint: d.MountPoint, Manual: d.Manual}
+	r.Type = d.FSType
+	if d.Bus != "" {
+		r.Type = strings.TrimPrefix(r.Type+" · "+d.Bus, " · ")
+	}
+	if d.Removable {
+		r.Type += " · removable"
+	}
+	if d.Manual {
+		r.Type = strings.TrimPrefix(r.Type+" · manual", " · ")
+	}
+	switch {
+	case d.HasUsage:
+		r.Capacity = humanBytes(d.Used) + " used of " + humanBytes(d.Size)
+	case d.Size > 0:
+		r.Capacity = humanBytes(d.Size)
+	}
+	act := func(path, label string, primary bool) driveAction {
+		return driveAction{Path: path, Key: d.Key, Label: label, Primary: primary}
+	}
+	enable := act("enable", "Enable", true)
+	if publish { // choosing who may use the drive happens on the Access page
+		enable.Path, enable.Link = "access", true
+	}
+	switch {
+	case d.State == driveAvailable && d.Mounted:
+		r.Status, r.Class = "Available", "ok"
+		r.Actions = []driveAction{act("ignore", "Disable", false)}
+		if publish {
+			access := act("access", "Access", false)
+			access.Link = true
+			r.Actions = []driveAction{access, act("ignore", "Disable", false)}
+			r.Access = describeShare(d.Share)
+		}
+	case d.State == driveAvailable:
+		r.Status, r.Class = "Not mounted", "off"
+		r.Actions = []driveAction{act("forget", "Remove", false)}
+	case d.State == driveIgnored:
+		r.Status, r.Class = "Ignored", "ign"
+		enable.Primary = false
+		r.Actions = []driveAction{enable}
+	default:
+		r.Status, r.Class = "New: not enabled", "new"
+		r.Actions = []driveAction{enable, act("ignore", "Ignore", false)}
+	}
+	if d.Manual && d.Mounted { // a manual entry can always be removed
+		r.Actions = append(r.Actions, act("forget", "Remove", false))
+	}
+	if d.Manual && d.State == driveIgnored {
+		r.Status = "Disabled"
+	}
+	return r
+}
+
+// describeShare summarizes who can use a published drive.
+func describeShare(sh *share) string {
+	if sh == nil {
+		return "Not shared with anyone yet"
+	}
+	var parts []string
+	plural := func(n int, one string) string {
+		if n == 1 {
+			return fmt.Sprintf("%d %s", n, one)
+		}
+		return fmt.Sprintf("%d %ss", n, one)
+	}
+	if n := len(sh.Users); n > 0 {
+		parts = append(parts, plural(n, "user"))
+	}
+	if n := len(sh.Roles); n > 0 {
+		parts = append(parts, plural(n, "role"))
+	}
+	if len(parts) == 0 {
+		return "Not shared with anyone yet"
+	}
+	mode := "read-write"
+	if sh.ReadOnly {
+		mode = "read-only"
+	}
+	return strings.Join(parts, ", ") + " · " + mode + " at " + sh.VPath()
+}
+
+func (u *ui) withNav(p page, nav string) page {
+	p.Nav = nav
+	if u.media != nil {
+		p.HasMedia = true
+		p.Pending = u.media.pending()
+		p.MediaDir = u.media.cfg.HostDir
+	}
+	return p
+}
+
+func (u *ui) registerDrives(mux *http.ServeMux) {
+	mux.HandleFunc("GET "+uiPrefix+"drives", u.drivesPage)
+	mux.HandleFunc("GET "+uiPrefix+"drives/table", u.drivesTable)
+	mux.HandleFunc("GET "+uiPrefix+"drives/events", u.driveEvents)
+	mux.HandleFunc("GET "+uiPrefix+"drives/access", u.accessPage)
+	mux.HandleFunc("POST "+uiPrefix+"drives/access", u.accessSave)
+	mux.HandleFunc("POST "+uiPrefix+"drives/{action}", u.driveAction)
+}
+
+func (u *ui) drivesData(s *uiSession) page {
+	var rows []driveRow
+	for _, d := range u.media.snapshot() {
+		if d.State == driveIgnored && !d.Mounted && !d.Manual {
+			continue
+		}
+		rows = append(rows, rowFor(d, u.media.cfg.SFTPGoDir != ""))
+	}
+	return u.withNav(page{Admin: s.admin, Drives: rows}, "drives")
+}
+
+func (u *ui) drivesPage(w http.ResponseWriter, r *http.Request) {
+	s := u.session(r)
+	if s == nil {
+		http.Redirect(w, r, uiPrefix+"login", http.StatusFound)
+		return
+	}
+	render(w, http.StatusOK, drivesTmpl, u.drivesData(s))
+}
+
+// drivesTable returns just the table, which the page swaps in on every change.
+func (u *ui) drivesTable(w http.ResponseWriter, r *http.Request) {
+	s := u.session(r)
+	if s == nil {
+		http.Error(w, "sign in required", http.StatusUnauthorized)
+		return
+	}
+	renderNamed(w, http.StatusOK, drivesTmpl, "drives", u.drivesData(s))
+}
+
+// driveEvents streams a message to the browser after every change.
+func (u *ui) driveEvents(w http.ResponseWriter, r *http.Request) {
+	if u.session(r) == nil {
+		http.Error(w, "sign in required", http.StatusUnauthorized)
+		return
+	}
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-Accel-Buffering", "no")
+	ch, cancel := u.media.subscribe()
+	defer cancel()
+	send := func() {
+		fmt.Fprintf(w, "data: {\"pending\":%d}\n\n", u.media.pending())
+		fl.Flush()
+	}
+	send()
+	keepAlive := time.NewTicker(30 * time.Second)
+	defer keepAlive.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ch:
+			send()
+		case <-keepAlive.C:
+			if u.session(r) == nil { // signed out or expired: end the stream
+				return
+			}
+			fmt.Fprint(w, ": keep-alive\n\n")
+			fl.Flush()
+		}
+	}
+}
+
+// driveAction enables, ignores or forgets a drive. The page calls it with
+// fetch (X-Mlw-Fetch) and gets 204; a plain form post is redirected back.
+func (u *ui) driveAction(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	s := u.session(r)
+	if s == nil {
+		http.Redirect(w, r, uiPrefix+"login", http.StatusSeeOther)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<14)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	key := r.PostForm.Get("key")
+	var err error
+	if a := r.PathValue("action"); a == "ignore" || a == "forget" {
+		// Withdraw the drive from SFTPGo first; if that fails the drive stays as it is.
+		if sh, ok := u.media.shareOf(key); ok {
+			if err := u.unpublish(s.token, sh); err != nil {
+				log.Printf("ui drives: unpublish %s: %v", sh.Folder(), err)
+				http.Error(w, "Could not withdraw the drive from SFTPGo: "+err.Error(), http.StatusBadGateway)
+				return
+			}
+		}
+	}
+	switch r.PathValue("action") {
+	case "enable":
+		err = u.media.decide(key, driveAvailable, s.admin)
+	case "ignore":
+		err = u.media.decide(key, driveIgnored, s.admin)
+	case "forget":
+		err = u.media.forget(key, s.admin)
+	case "add":
+		err = u.media.addManual(r.PostForm.Get("name"), r.PostForm.Get("path"), strings.TrimSpace(r.PostForm.Get("device")),
+			strings.TrimSpace(r.PostForm.Get("fstype")), r.PostForm.Get("enable") != "", s.admin)
+	default:
+		http.NotFound(w, r)
+		return
+	}
+	var bad inputError
+	switch {
+	case errors.As(err, &bad):
+		http.Error(w, bad.Error(), http.StatusUnprocessableEntity)
+		return
+	case err == errNoSuchDrive:
+		http.Error(w, "That drive is no longer mounted.", http.StatusConflict)
+		return
+	case err != nil:
+		log.Printf("ui drives: %v", err)
+		http.Error(w, "Could not save the decision.", http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("X-Mlw-Fetch") != "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	http.Redirect(w, r, uiPrefix+"drives", http.StatusSeeOther)
+}
+
+var drivesTmpl = func() *template.Template {
+	t := mustPage("mlw-storage: Drives", uiBar+`<main><div class="head"><div><h1>Drives</h1>
+<p class="sub">Physical storage volumes mounted on this machine. A drive is made available to mlw-storage only after you enable it.</p></div></div>
+<div id="drives">{{template "drives" .}}</div>
+<p class="addrow"><button type="button" class="btn" data-open="add-drive">Add drive</button></p>
+<dialog id="add-drive" aria-labelledby="add-title"><form class="addform" method="post" action="/mlw/drives/add">
+<h2 id="add-title">Add a drive manually</h2>
+<p class="dim">For a drive that is mounted below <b>{{.MediaDir}}</b> but was not detected, such as a FUSE or network volume.</p>
+<div class="err" role="alert" hidden></div>
+<label for="ad-name">Name</label><input id="ad-name" name="name" maxlength="64" required placeholder="Backup disk">
+<label for="ad-path">Mount point</label><input id="ad-path" name="path" required placeholder="{{.MediaDir}}/…" value="{{.MediaDir}}/">
+<div class="dim">Absolute path on the host. It must be a mounted volume.</div>
+<label for="ad-dev">Device <span class="dim">(optional)</span></label><input id="ad-dev" name="device" maxlength="64" placeholder="/dev/sdb1">
+<label for="ad-fs">File system <span class="dim">(optional)</span></label><input id="ad-fs" name="fstype" maxlength="24" placeholder="ext4">
+<label class="check"><input type="checkbox" name="enable" value="1" checked>Make available to mlw-storage now</label>
+<div class="actions"><button type="submit" class="btn">Add drive</button><button type="button" class="btn ghost" data-close>Cancel</button></div>
+</form></dialog></main>`)
+	template.Must(t.New("drives").Parse(`{{if .Pending}}<div class="note" role="status"><b>{{.Pending}}</b> new drive{{if ne .Pending 1}}s{{end}} detected. Enable a drive to make it available to mlw-storage.</div>{{end}}
+<div class="card wrap"><table><thead><tr><th>Drive</th><th>Mount point</th><th>Type</th><th>Capacity</th><th>Status</th><th></th></tr></thead><tbody>
+{{range .Drives}}<tr><td><b>{{.Name}}</b><div class="dim">{{.Device}}</div></td><td>{{.MountPoint}}</td><td>{{.Type}}</td><td>{{.Capacity}}</td><td><span class="pill {{.Class}}">{{.Status}}</span>{{with .Access}}<div class="dim">{{.}}</div>{{end}}</td><td class="acts">{{range .Actions}}{{if .Link}}<a class="btn{{if not .Primary}} ghost{{end}}" href="/mlw/drives/access?key={{.Key}}">{{.Label}}</a>{{else}}<form class="act" method="post" action="/mlw/drives/{{.Path}}"><input type="hidden" name="key" value="{{.Key}}"><button type="submit" class="btn{{if not .Primary}} ghost{{end}}">{{.Label}}</button></form>{{end}}{{end}}</td></tr>
+{{else}}<tr><td colspan="6">No physical drives detected. Plug in a USB or external drive and it will appear here.</td></tr>{{end}}
+</tbody></table></div>`))
+	return t
+}()

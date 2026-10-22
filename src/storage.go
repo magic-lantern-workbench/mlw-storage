@@ -230,7 +230,8 @@ type rootResponse struct {
 //	PUT    {prefix}root        {"path": "projects/a"}  select a directory
 //	DELETE {prefix}root        back to the private default directory
 //	GET    {prefix}dirs?path=  list subdirectories that can be selected
-func storageAPI(prefix string, v *verifier, st *storage) http.Handler {
+//	GET    {prefix}drives      the removable drives the user may use now
+func storageAPI(prefix string, v *verifier, st *storage, drives ...driveGranter) http.Handler {
 	mux := http.NewServeMux()
 
 	current := func(sub string) rootResponse {
@@ -306,7 +307,36 @@ func storageAPI(prefix string, v *verifier, st *storage) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"path": rel, "dirs": names})
 	})
 
+	// The removable drives (see media_share.go) the user can use now: those the
+	// administrator enabled for the user or one of the token's realm roles and
+	// that are mounted. They appear in the user's SFTP root at path.
+	mux.HandleFunc(prefix+"drives", func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := authorize(w, r, v)
+		if !ok {
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		userReadOnly := v.cfg.ReadOnlyRole != "" && claims.hasRole(v.cfg.ReadOnlyRole)
+		list := []driveInfo{}
+		for _, d := range drives {
+			for _, g := range d.grants(claims.Subject, claims.RealmAccess.Roles) {
+				list = append(list, driveInfo{Name: strings.TrimPrefix(g.VirtualPath, "/drives/"), Path: g.VirtualPath, ReadOnly: g.ReadOnly || userReadOnly})
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"drives": list})
+	})
+
 	return mux
+}
+
+// driveInfo is one entry of the drives answer.
+type driveInfo struct {
+	Name     string `json:"name"`
+	Path     string `json:"path"`      // where it appears in the user's storage, /drives/<name>
+	ReadOnly bool   `json:"read_only"` // the drive is read-only, or the user is
 }
 
 // authorize validates the bearer token and the required role, writing the

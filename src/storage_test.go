@@ -32,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -377,5 +378,62 @@ func TestAuthHookUsesSelectedDirectory(t *testing.T) {
 	}
 	if rec := callHook(t, h, http.MethodPost, login); rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403 when the selected directory is gone", rec.Code)
+	}
+}
+
+func TestDrivesEndpoint(t *testing.T) {
+	k := newTestKey(t, "k1")
+	srv := newJWKSServer(t, k)
+	st, _ := newTree(t)
+	grants := stubGranter{
+		{Name: "mlw-drive-Backup", MappedPath: "/srv/drives/m/Backup", VirtualPath: "/drives/Backup"},
+		{Name: "mlw-drive-Ro", MappedPath: "/srv/drives/m/Ro", VirtualPath: "/drives/Ro", ReadOnly: true},
+	}
+	token := func(roles ...string) string { return sign(t, k, claimsMap("user-1", roles...)) }
+	get := func(h http.Handler, tok string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/mlw/v1/storage/drives", nil)
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	decode := func(rec *httptest.ResponseRecorder) []driveInfo {
+		var out struct {
+			Drives []driveInfo `json:"drives"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode %q: %v", rec.Body.String(), err)
+		}
+		return out.Drives
+	}
+
+	h := storageAPI("/mlw/v1/storage/", newTestVerifier(srv.URL, nil), st, grants)
+	if rec := get(h, ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token: status %d", rec.Code)
+	}
+	rec := get(h, token("mlw-user"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	want := []driveInfo{{"Backup", "/drives/Backup", false}, {"Ro", "/drives/Ro", true}}
+	if got := decode(rec); !reflect.DeepEqual(got, want) {
+		t.Errorf("drives = %+v, want %+v", got, want)
+	}
+
+	// a read-only user is read-only on every drive
+	ro := storageAPI("/mlw/v1/storage/", newTestVerifier(srv.URL, func(c *authConfig) { c.ReadOnlyRole = "viewer" }), st, grants)
+	for _, d := range decode(get(ro, token("mlw-user", "viewer"))) {
+		if !d.ReadOnly {
+			t.Errorf("%s should be read-only for a read-only user", d.Path)
+		}
+	}
+
+	// no drives feature: an empty list, not an error
+	none := storageAPI("/mlw/v1/storage/", newTestVerifier(srv.URL, nil), st)
+	rec = get(none, token("mlw-user"))
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"drives":[]}` {
+		t.Errorf("without drives: %d %q", rec.Code, rec.Body)
 	}
 }

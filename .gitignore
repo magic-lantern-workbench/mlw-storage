@@ -37,3 +37,6 @@ go.work.sum
 
 # LibreOffice lock files
 .~lock.*#
+
+# Release packages
+/releases/

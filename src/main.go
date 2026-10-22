@@ -24,6 +24,10 @@
 
 // Command mlw-proxy is a gateway in front of SFTPGo. It exposes:
 //   - an HTTP reverse proxy for SFTPGo's web UI, REST API and WebClient
+//   - the mlw-storage web UI (login, Home, Dashboard) at /mlw/, which is also
+//     where / redirects; disable it with PROXY_UI=false
+//   - optionally (disabled by default) detection of physical drives mounted
+//     while it runs, offered for enabling on the web UI's Drives page
 //   - a TCP proxy for SFTP, so remote servers can transfer files through it
 //   - optionally (disabled by default) a TCP proxy for FTP, including the
 //     passive data port range, and an HTTP reverse proxy for WebDAV
@@ -89,7 +93,40 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok\n")
 	})
-	mux.Handle("/", newHTTPProxy(target))
+	var drives driveGranter // set when drives are published through SFTPGo
+	if env("PROXY_UI", "true") != "false" {
+		// SFTPGo's admin pages get a link back to the mlw-storage Dashboard.
+		mux.Handle("/", newHTTPProxyWith(target, addBackLink))
+		ui := newUI(upstreamHTTP)
+		ui.roles = oidcIssuer != ""
+		if dir := env("MEDIA_DIR", ""); dir != "" {
+			ms, err := newMediaStore(mediaConfig{
+				Dir:            dir,
+				HostDir:        env("MEDIA_HOST_DIR", dir),
+				StateFile:      env("MEDIA_STATE_FILE", "/var/lib/mlw-proxy/media.json"),
+				IncludeVirtual: env("MEDIA_INCLUDE_VIRTUAL", "") == "true",
+				SFTPGoDir:      strings.TrimRight(env("MEDIA_SFTPGO_DIR", ""), "/"),
+			})
+			if err != nil {
+				log.Fatalf("media: %v", err)
+			}
+			ui.media = ms
+			if ms.cfg.SFTPGoDir != "" {
+				drives = ms
+				log.Printf("media: enabled drives are published to SFTPGo under %s", ms.cfg.SFTPGoDir)
+			}
+			go func() {
+				if err := ms.watch(ctx); err != nil {
+					log.Printf("media: drive detection stopped: %v", err)
+				}
+			}()
+			log.Printf("media: watching mounts below %s (host %s) for physical drives", dir, ms.cfg.HostDir)
+		}
+		ui.register(mux)
+		log.Print("web UI at /mlw/ (/ redirects there)")
+	} else {
+		mux.Handle("/", newHTTPProxy(target))
+	}
 
 	// Optional Keycloak authentication and per-user storage roots.
 	var (
@@ -115,7 +152,11 @@ func main() {
 			log.Fatalf("storage: %v", err)
 		}
 		// Users choose their root directory through the public HTTP port.
-		mux.Handle("/mlw/v1/storage/", storageAPI("/mlw/v1/storage/", ver, st))
+		var granters []driveGranter
+		if drives != nil {
+			granters = append(granters, drives)
+		}
+		mux.Handle("/mlw/v1/storage/", storageAPI("/mlw/v1/storage/", ver, st, granters...))
 	}
 
 	srv := &http.Server{
@@ -156,7 +197,11 @@ func main() {
 	var authSrv *http.Server
 	if oidcIssuer != "" {
 		amux := http.NewServeMux()
-		amux.Handle("/auth", authHook(ver, st))
+		if drives != nil {
+			amux.Handle("/auth", authHook(ver, st, drives))
+		} else {
+			amux.Handle("/auth", authHook(ver, st))
+		}
 		authSrv = &http.Server{
 			Addr:              authListen,
 			Handler:           amux,
@@ -268,13 +313,24 @@ func parseRange(v string) (lo, hi int, err error) {
 // newHTTPProxy returns a reverse proxy to target that preserves the original
 // Host and records the client address in X-Forwarded-* headers.
 func newHTTPProxy(target *url.URL) http.Handler {
+	return newHTTPProxyWith(target, nil)
+}
+
+// newHTTPProxyWith is newHTTPProxy with an optional hook that may rewrite
+// responses. When a hook is set, request compression is switched off so the
+// hook sees plain bodies.
+func newHTTPProxyWith(target *url.URL, modify func(*http.Response) error) http.Handler {
 	return &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
 			r.Out.Host = r.In.Host
 			r.SetXForwarded()
+			if modify != nil {
+				r.Out.Header.Del("Accept-Encoding")
+			}
 		},
-		ErrorLog: log.Default(),
+		ModifyResponse: modify,
+		ErrorLog:       log.Default(),
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("http proxy %s %s: %v", r.Method, r.URL.Path, err)
 			http.Error(w, "upstream unavailable", http.StatusBadGateway)
