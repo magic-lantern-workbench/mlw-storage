@@ -52,6 +52,20 @@ func fakeSFTPGo(t *testing.T, users []map[string]any) *httptest.Server {
 				"access_token": "tok123",
 				"expires_at":   time.Now().Add(20 * time.Minute).UTC().Format(time.RFC3339),
 			})
+		case "/web/admin/login":
+			if r.Method == http.MethodGet {
+				http.SetCookie(w, &http.Cookie{Name: "jwt", Value: "formjwt", Path: "/web/admin"})
+				_, _ = io.WriteString(w, `<input type="hidden" name="_form_token" value="csrf1">`)
+				return
+			}
+			c, err := r.Cookie("jwt")
+			if err != nil || c.Value != "formjwt" || r.FormValue("_form_token") != "csrf1" ||
+				r.FormValue("username") != "admin" || r.FormValue("password") != "secret" {
+				http.Error(w, "bad login", http.StatusUnauthorized)
+				return
+			}
+			http.SetCookie(w, &http.Cookie{Name: "jwt", Value: "adminjwt", Path: "/web/admin", MaxAge: 1200})
+			http.Redirect(w, r, "/web/admin/users", http.StatusFound)
 		case "/api/v2/users":
 			if r.Header.Get("Authorization") != "Bearer tok123" {
 				http.Error(w, "{}", http.StatusUnauthorized)
@@ -233,7 +247,7 @@ func TestUIDashboard(t *testing.T) {
 		t.Error("SFTPGo token leaked to the page")
 	}
 
-	if !strings.Contains(body, `href="/web/admin/"`) || !strings.Contains(body, "SFTPGo administration") {
+	if !strings.Contains(body, `class="item" href="/mlw/console">SFTPGo</a><a class="item" href="/mlw/report">Report</a><form`) {
 		t.Errorf("dashboard lacks the SFTPGo admin button: %s", body)
 	}
 	if rec := get(h, "/mlw/", c); rec.Header().Get("Location") != "/mlw/dashboard" {
@@ -458,5 +472,39 @@ func TestPaginate(t *testing.T) {
 		if strings.Join(labels, ",") != strings.Join(want, ",") {
 			t.Errorf("%d rows: %v, want %v", n, labels, want)
 		}
+	}
+}
+
+func TestUIConsoleSignsInToSFTPGo(t *testing.T) {
+	_, h := newUIServer(t, nil)
+	if rec := get(h, "/mlw/console", nil); rec.Code != http.StatusFound || rec.Header().Get("Location") != "/mlw/login" {
+		t.Fatalf("anonymous: %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	rec := get(h, "/mlw/console", login(t, h))
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/web/admin/users" {
+		t.Fatalf("console: %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	var jwt *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "jwt" {
+			jwt = c
+		}
+	}
+	if jwt == nil || jwt.Value != "adminjwt" || jwt.Path != "/web/admin" || !jwt.HttpOnly || jwt.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("jwt cookie: %+v", jwt)
+	}
+}
+
+func TestUIConsoleWithoutSFTPGoSignIn(t *testing.T) {
+	u, h := newUIServer(t, nil)
+	c := login(t, h)
+	u.mu.Lock()
+	for _, s := range u.sessions {
+		s.console = nil
+	}
+	u.mu.Unlock()
+	rec := get(h, "/mlw/console", c)
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/web/admin/users" || len(rec.Result().Cookies()) != 0 {
+		t.Fatalf("console: %d %q cookies=%v", rec.Code, rec.Header().Get("Location"), rec.Result().Cookies())
 	}
 }

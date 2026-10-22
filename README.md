@@ -82,7 +82,7 @@ redirects to it:
 | Page | URL | Purpose |
 |------|-----|---------|
 | Sign in | `/mlw/login` | mlw-storage login; use the SFTPGo administrator credentials |
-| Dashboard | `/mlw/dashboard` | the home page after sign-in: a table of the SFTPGo users (Username, Status, Last login, Description), 20 users per table with left and right arrows and a range label (`1..20`, `21..40`, ...) to move between tables, and the **SFTPGo administration** button, which opens SFTPGo's own admin console (`/web/admin/`, separate sign-in). |
+| Dashboard | `/mlw/dashboard` | the home page after sign-in: a table of the SFTPGo users (Username, Status, Last login, Description), 20 users per table with left and right arrows and a range label (`1..20`, `21..40`, ...) to move between tables, and, in the user-icon menu (before Logout), **SFTPGo**, which opens SFTPGo's own admin console (`/web/admin/users`) already signed in. |
 
 The gateway checks the credentials against SFTPGo's REST API and keeps the
 resulting API token on the server, behind an HttpOnly, SameSite=Strict session

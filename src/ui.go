@@ -46,6 +46,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -56,17 +57,19 @@ const (
 	uiPrefix      = "/mlw/"
 	uiCookie      = "mlw_session"
 	uiAdminPath   = "/web/admin/"
-	uiUserPage    = 500             // users fetched per SFTPGo API call
-	uiMaxUsers    = 20000           // upper bound on users shown
-	uiPageSize    = 20              // users per Dashboard table
-	uiMaxFailures = 10              // failed logins per client address ...
-	uiFailWindow  = 5 * time.Minute // ... within this window
+	uiConsolePath = uiPrefix + "console" // signs the administrator in to SFTPGo, then opens it
+	uiUserPage    = 500                  // users fetched per SFTPGo API call
+	uiMaxUsers    = 20000                // upper bound on users shown
+	uiPageSize    = 20                   // users per Dashboard table
+	uiMaxFailures = 10                   // failed logins per client address ...
+	uiFailWindow  = 5 * time.Minute      // ... within this window
 )
 
 type uiSession struct {
 	admin   string
 	token   string // SFTPGo API token
 	expires time.Time
+	console *http.Cookie // SFTPGo web admin sign-in, or nil
 }
 
 type ui struct {
@@ -102,6 +105,8 @@ func (u *ui) register(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+uiPrefix+"login", u.login)
 	mux.HandleFunc("POST "+uiPrefix+"logout", u.logout)
 	mux.HandleFunc("GET "+uiPrefix+"dashboard", u.dashboard)
+	mux.HandleFunc("GET "+uiPrefix+"console", u.console)
+	mux.HandleFunc("GET "+uiPrefix+"report", u.report)
 	if u.media != nil {
 		u.registerDrives(mux)
 	}
@@ -256,7 +261,8 @@ func (u *ui) login(w http.ResponseWriter, r *http.Request) {
 		render(w, http.StatusBadGateway, loginTmpl, page{Error: "The storage service is unavailable. Try again shortly.", Username: user})
 		return
 	}
-	if err := u.startSession(w, r, &uiSession{admin: user, token: token, expires: expires}); err != nil {
+	console := u.consoleCookie(user, pass) // best effort: without it SFTPGo asks for a sign-in
+	if err := u.startSession(w, r, &uiSession{admin: user, token: token, expires: expires, console: console}); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -287,7 +293,7 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	case err != nil:
 		log.Printf("ui dashboard: %v", err)
-		render(w, http.StatusBadGateway, dashTmpl, u.withNav(page{Admin: s.admin, AdminURL: uiAdminPath,
+		render(w, http.StatusBadGateway, dashTmpl, u.withNav(page{Admin: s.admin,
 			Error: "Could not read the user list from SFTPGo."}, "dashboard"))
 		return
 	}
@@ -304,9 +310,70 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = append(rows, row)
 	}
-	render(w, http.StatusOK, dashTmpl, u.withNav(page{Admin: s.admin, AdminURL: uiAdminPath, Pages: paginate(rows),
+	render(w, http.StatusOK, dashTmpl, u.withNav(page{Admin: s.admin, Pages: paginate(rows),
 		Total: len(rows), ActiveCount: active, Generated: u.now().UTC().Format("2006-01-02 15:04:05 UTC")}, "dashboard"))
 }
+
+// console opens SFTPGo's admin console. When the sign-in done at Dashboard
+// login is still valid, its cookie is handed to the browser first so SFTPGo
+// does not ask for a second sign-in; otherwise SFTPGo shows its own form.
+func (u *ui) console(w http.ResponseWriter, r *http.Request) {
+	s := u.session(r)
+	if s == nil {
+		http.Redirect(w, r, uiPrefix+"login", http.StatusFound)
+		return
+	}
+	if c := s.console; c != nil && u.now().Before(c.Expires) {
+		cc := *c
+		cc.HttpOnly, cc.SameSite = true, http.SameSiteStrictMode
+		cc.Secure = r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+		http.SetCookie(w, &cc)
+	}
+	http.Redirect(w, r, uiAdminPath+"users", http.StatusFound) // "/web/admin/" itself always goes to the sign-in form
+}
+
+// consoleCookie signs in to SFTPGo's web admin on the administrator's behalf
+// (the password is only used here, never stored) and returns its session
+// cookie, or nil if that is not possible.
+func (u *ui) consoleCookie(user, pass string) *http.Cookie {
+	form, err := u.client.Get(u.api + uiAdminPath + "login")
+	if err != nil {
+		return nil
+	}
+	page, _ := io.ReadAll(io.LimitReader(form.Body, 1<<20))
+	form.Body.Close()
+	m := formTokenRE.FindSubmatch(page)
+	if form.StatusCode != http.StatusOK || m == nil {
+		return nil
+	}
+	nr := *u.client
+	nr.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	req, _ := http.NewRequest(http.MethodPost, u.api+uiAdminPath+"login", strings.NewReader(url.Values{
+		"username": {user}, "password": {pass}, "_form_token": {string(m[1])}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, c := range form.Cookies() {
+		req.AddCookie(c)
+	}
+	resp, err := nr.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther {
+		return nil
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == "jwt" && c.Value != "" {
+			if c.Expires.IsZero() {
+				c.Expires = u.now().Add(20 * time.Minute)
+			}
+			return c
+		}
+	}
+	return nil
+}
+
+var formTokenRE = regexp.MustCompile(`name="_form_token" value="([^"]+)"`)
 
 // ---- SFTPGo API ----------------------------------------------------------
 
@@ -426,16 +493,16 @@ type userRow struct {
 }
 
 type page struct {
-	Admin, AdminURL, Error, Username string
-	Nav                              string // current page in the top bar
-	HasMedia                         bool   // show the Drives page
-	Pending                          int    // drives waiting for a decision
-	MediaDir                         string // media directory on the host
-	Drives                           []driveRow
-	Access                           *accessView
-	Pages                            []userPage
-	Total, ActiveCount               int
-	Generated                        string
+	Admin, Error, Username string
+	Nav                    string // current page in the top bar
+	HasMedia               bool   // show the Drives page
+	Pending                int    // drives waiting for a decision
+	MediaDir               string // media directory on the host
+	Drives                 []driveRow
+	Access                 *accessView
+	Pages                  []userPage
+	Total, ActiveCount     int
+	Generated              string
 }
 
 func render(w http.ResponseWriter, status int, t *template.Template, p page) {
@@ -530,8 +597,9 @@ th{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 .menu summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .drop{position:absolute;right:0;top:46px;min-width:160px;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.15);padding:6px;z-index:10}
 .drop form{margin:0}
+.addrow{margin:16px 0 0;text-align:right}
 .uname{color:var(--ink);font-weight:600;max-width:40vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:-8px}
-.item{display:block;width:100%;text-align:left;background:transparent;color:var(--ink);border:0;border-radius:6px;padding:8px 10px;font:inherit;cursor:pointer}
+.item{display:block;box-sizing:border-box;text-decoration:none;width:100%;text-align:left;background:transparent;color:var(--ink);border:0;border-radius:6px;padding:8px 10px;font:inherit;cursor:pointer}
 .item:hover,.item:focus-visible{background:var(--bg)}
 .login{max-width:380px;margin:12vh auto 0;padding:0 16px}
 label{display:block;font-size:14px;color:var(--muted);margin:14px 0 4px}
@@ -577,7 +645,7 @@ var menuCSP = func() string {
 const uiBar = `<header><div class="bar"><span class="brand">mlw-storage<small>Magic Lantern Workbench</small></span>
 {{if .HasMedia}}<nav><a href="/mlw/dashboard"{{if eq .Nav "dashboard"}} class="on"{{end}}>Dashboard</a><a id="nav-drives" href="/mlw/drives"{{if eq .Nav "drives"}} class="on"{{end}}>Drives<span class="badge" id="pending"{{if not .Pending}} hidden{{end}}>{{.Pending}}</span></a></nav>{{end}}
 <span class="grow"></span><span class="uname">{{.Admin}}</span><details class="menu"><summary aria-label="Account menu" title="Account"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3.2"/><path d="M5.8 18.6c1.4-2.4 3.6-3.6 6.2-3.6s4.8 1.2 6.2 3.6"/></svg></summary>
-<div class="drop"><form method="post" action="/mlw/logout"><button class="item" type="submit">Logout</button></form></div></details>
+<div class="drop"><a class="item" href="` + uiConsolePath + `">SFTPGo</a><a class="item" href="/mlw/report">Report</a><form method="post" action="/mlw/logout"><button class="item" type="submit">Logout</button></form></div></details>
 <script>` + menuJS + `</script></div></header>`
 
 func mustPage(title, body string) *template.Template {
@@ -594,8 +662,7 @@ var loginTmpl = mustPage("mlw-storage: Sign in", `<div class="login"><div class=
 <p class="foot">Use the SFTPGo administrator credentials.</p></div>`)
 
 var dashTmpl = mustPage("mlw-storage: Dashboard", uiBar+`<main><div class="head"><div><h1>Dashboard</h1>
-<p class="sub">Local file storage users.</p></div>
-<a class="btn" href="{{.AdminURL}}">SFTPGo administration</a></div>
+<p class="sub">Local file storage users.</p></div></div>
 {{with .Error}}<div class="err" role="alert">{{.}}</div>{{else}}
 <div class="stats"><span><b>{{.Total}}</b> users</span><span><b>{{.ActiveCount}}</b> active</span><span>Updated {{.Generated}}</span></div>
 <div class="card">

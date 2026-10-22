@@ -304,9 +304,9 @@ func (u *ui) driveAction(w http.ResponseWriter, r *http.Request) {
 
 var drivesTmpl = func() *template.Template {
 	t := mustPage("mlw-storage: Drives", uiBar+`<main><div class="head"><div><h1>Drives</h1>
-<p class="sub">Physical storage volumes mounted on this machine. A drive is made available to mlw-storage only after you enable it.</p></div>
-<button type="button" class="btn" data-open="add-drive">Add drive</button></div>
+<p class="sub">Physical storage volumes mounted on this machine. A drive is made available to mlw-storage only after you enable it.</p></div></div>
 <div id="drives">{{template "drives" .}}</div>
+<p class="addrow"><button type="button" class="btn" data-open="add-drive">Add drive</button></p>
 <dialog id="add-drive" aria-labelledby="add-title"><form class="addform" method="post" action="/mlw/drives/add">
 <h2 id="add-title">Add a drive manually</h2>
 <p class="dim">For a drive that is mounted below <b>{{.MediaDir}}</b> but was not detected, such as a FUSE or network volume.</p>
