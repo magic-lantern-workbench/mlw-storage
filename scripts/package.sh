@@ -128,7 +128,7 @@ cp "$ROOT/doc/Installation.md" "$STAGE/Installation.md"
 cp "$NOTES" "$STAGE/"
 install -m 755 "$ROOT/scripts/install.sh" "$STAGE/install.sh"
 mkdir -p "$STAGE/src"
-cp "$ROOT"/src/Dockerfile "$ROOT"/src/go.mod "$ROOT"/src/go.sum "$ROOT"/src/*.go "$STAGE/src/"
+cp "$ROOT"/src/Dockerfile "$ROOT"/src/go.mod "$ROOT"/src/go.sum "$ROOT"/src/*.go "$ROOT"/src/LICENSE "$STAGE/src/"
 
 cat >"$STAGE/manifest.env" <<MANIFEST
 MLW_VERSION=$VERSION

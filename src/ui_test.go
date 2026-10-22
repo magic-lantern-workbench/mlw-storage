@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -506,5 +507,26 @@ func TestUIConsoleWithoutSFTPGoSignIn(t *testing.T) {
 	rec := get(h, "/mlw/console", c)
 	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/web/admin/users" || len(rec.Result().Cookies()) != 0 {
 		t.Fatalf("console: %d %q cookies=%v", rec.Code, rec.Header().Get("Location"), rec.Result().Cookies())
+	}
+}
+
+func TestAboutDialog(t *testing.T) {
+	_, h := newUIServer(t, nil)
+	body := get(h, "/mlw/dashboard", login(t, h)).Body.String()
+	for _, want := range []string{"Magic Lantern Storage Manager", "Version: v1.1.0", "Author: Wizzer Works",
+		`data-open="about">About</button>`, "MIT License", "Copyright (c) 2026 Wizzer Works"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard lacks %q", want)
+		}
+	}
+}
+
+func TestEmbeddedLicenseMatchesProjectLicense(t *testing.T) {
+	root, err := os.ReadFile("../LICENSE")
+	if err != nil {
+		t.Skip("project LICENSE not available")
+	}
+	if string(root) != licenseText {
+		t.Error("src/LICENSE differs from the project LICENSE; copy it over")
 	}
 }

@@ -37,9 +37,11 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"html/template"
 	"io"
 	"log"
@@ -541,7 +543,19 @@ header{background:var(--card);border-bottom:1px solid var(--line)}
 .grow{flex:1}
 nav{display:flex;gap:4px}
 nav a{color:var(--muted);text-decoration:none;padding:6px 10px;border-radius:8px;display:flex;align-items:center;gap:6px}
-nav a:hover{background:var(--bg)}
+nav a:hover,nav button:hover{background:var(--bg)}
+nav button{background:transparent;border:0;color:var(--muted);font:inherit;padding:6px 10px;border-radius:8px;cursor:pointer}
+dialog.about{padding:0;width:min(640px,calc(100vw - 32px));overflow:hidden}
+.about h2{margin:0;padding:16px 20px;background:var(--accent);color:#fff;font-size:20px}
+.about .body{padding:8px 20px 0}
+.about .tabs{display:flex;gap:8px;margin:12px 0 16px}
+.about .tabs button{background:transparent;border:0;border-bottom:2px solid transparent;color:var(--ink);font:inherit;font-weight:600;padding:8px 14px;cursor:pointer}
+.about .tabs button[aria-selected=true]{border-bottom-color:var(--ink)}
+.about p{margin:0 0 14px}
+.about a{color:var(--accent)}
+.about pre{margin:0 0 14px;max-height:45vh;overflow:auto;white-space:pre-wrap;font:13px/1.45 ui-monospace,Menlo,Consolas,monospace}
+.about .foot{display:flex;justify-content:flex-end;padding:0 20px 18px}
+.about [hidden]{display:none}
 nav a.on{color:var(--ink);background:var(--bg);font-weight:600}
 .badge{background:var(--bad);color:#fff;border-radius:999px;font-size:12px;font-weight:700;min-width:20px;height:20px;padding:0 6px;display:inline-flex;align-items:center;justify-content:center}
 .badge[hidden]{display:none}
@@ -614,7 +628,10 @@ const uiHead = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 
 // menuJS closes the account menu on a click outside it or on Escape. The page's
 // Content-Security-Policy allows only this script, by hash.
-const menuJS = `function badge(n){var b=document.getElementById("pending");if(b){b.textContent=n;b.hidden=!n}}` +
+const menuJS = `document.addEventListener("click",function(e){var t=e.target.closest?e.target.closest("[data-tab]"):null;if(!t)return;var d=t.closest("dialog");` +
+	`d.querySelectorAll("[data-tab]").forEach(function(b){b.setAttribute("aria-selected",b===t?"true":"false")});` +
+	`d.querySelectorAll("[data-panel]").forEach(function(p){p.hidden=p.getAttribute("data-panel")!==t.getAttribute("data-tab")})});` +
+	`function badge(n){var b=document.getElementById("pending");if(b){b.textContent=n;b.hidden=!n}}` +
 	`if(window.EventSource&&document.getElementById("nav-drives")){var es=new EventSource("/mlw/drives/events");` +
 	`es.onmessage=function(e){var d=JSON.parse(e.data);badge(d.pending);var c=document.getElementById("drives");` +
 	`if(c)fetch("/mlw/drives/table",{credentials:"same-origin"}).then(function(r){return r.ok?r.text():null}).then(function(h){if(h!==null)c.innerHTML=h})}}` +
@@ -642,11 +659,13 @@ var menuCSP = func() string {
 		"'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 }()
 
-const uiBar = `<header><div class="bar"><span class="brand">mlw-storage<small>Magic Lantern Workbench</small></span>
-{{if .HasMedia}}<nav><a href="/mlw/dashboard"{{if eq .Nav "dashboard"}} class="on"{{end}}>Dashboard</a><a id="nav-drives" href="/mlw/drives"{{if eq .Nav "drives"}} class="on"{{end}}>Drives<span class="badge" id="pending"{{if not .Pending}} hidden{{end}}>{{.Pending}}</span></a></nav>{{end}}
+var uiBar = uiBarHead + aboutHTML + `</header>`
+
+const uiBarHead = `<header><div class="bar"><span class="brand">mlw-storage<small>Magic Lantern Workbench</small></span>
+<nav>{{if .HasMedia}}<a href="/mlw/dashboard"{{if eq .Nav "dashboard"}} class="on"{{end}}>Dashboard</a><a id="nav-drives" href="/mlw/drives"{{if eq .Nav "drives"}} class="on"{{end}}>Drives<span class="badge" id="pending"{{if not .Pending}} hidden{{end}}>{{.Pending}}</span></a>{{end}}<button type="button" data-open="about">About</button></nav>
 <span class="grow"></span><span class="uname">{{.Admin}}</span><details class="menu"><summary aria-label="Account menu" title="Account"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3.2"/><path d="M5.8 18.6c1.4-2.4 3.6-3.6 6.2-3.6s4.8 1.2 6.2 3.6"/></svg></summary>
 <div class="drop"><a class="item" href="` + uiConsolePath + `">SFTPGo</a><a class="item" href="/mlw/report">Report</a><form method="post" action="/mlw/logout"><button class="item" type="submit">Logout</button></form></div></details>
-<script>` + menuJS + `</script></div></header>`
+<script>` + menuJS + `</script></div>`
 
 func mustPage(title, body string) *template.Template {
 	return template.Must(template.New("p").Parse(strings.Replace(uiHead, "{{.Title}}", title, 1) + body + `</body></html>`))
@@ -704,3 +723,20 @@ func addBackLink(resp *http.Response) error {
 	resp.Header.Set("Content-Length", fmt.Sprint(len(body)))
 	return nil
 }
+
+// appVersion and appTitle are shown in the About dialog.
+const (
+	appVersion = "v1.1.0"
+	appTitle   = "Magic Lantern Storage Manager"
+)
+
+//go:embed LICENSE
+var licenseText string
+
+// aboutHTML is the About dialog that every signed-in page carries.
+var aboutHTML = `<dialog id="about" class="about" aria-labelledby="about-title"><h2 id="about-title">` + appTitle + `</h2>
+<div class="body"><div class="tabs" role="tablist"><button type="button" role="tab" data-tab="about" aria-selected="true">About</button><button type="button" role="tab" data-tab="license" aria-selected="false">License</button></div>
+<div data-panel="about"><p>Author: Wizzer Works</p><p>Version: ` + appVersion + `</p>
+<p>Please visit <a href="https://www.wizzerworks.com" target="_blank" rel="noopener noreferrer">www.wizzerworks.com</a> for more information about this tool.</p></div>
+<div data-panel="license" hidden><pre>` + html.EscapeString(licenseText) + `</pre></div></div>
+<div class="foot"><button type="button" class="btn ghost" data-close>CLOSE</button></div></dialog>`
